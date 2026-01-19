@@ -14,7 +14,8 @@ Then I deployed my flask app on a cloud hosting platform (render)
 
 ## Requirments issues
 
-In the deployment process usually the problem is with the **requirements.txt**, specifically compatibility between th packages and python version in render.
+In the deployment process usually the problem is with the **requirements.txt**, specifically compatibility between the packages and python version on Render.
+So, to solve the problem check with chatGPT which version of the packages are compatible with the python version used by Render and you are good to go
 
 ## Gunicorn settings
 
