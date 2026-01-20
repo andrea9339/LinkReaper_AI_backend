@@ -1,11 +1,11 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import os
 import pandas as pd
 from serpapi import GoogleSearch
 from openai import OpenAI
 import tempfile
-import io
+import json
 
 app = Flask(__name__)
 
@@ -75,134 +75,187 @@ NO
         # In case of error, default to keeping the result
         return True
 
-@app.route('/api/search', methods=['POST'])
-def search():
-    data = request.json
-    fixed_part = data['fixedPart']
-    keywords = data['keywords'].split(',')
-    additional_words = data.get('additionalWords', '').split(',')
-    case_description = data.get('caseDescription', '').strip()
 
-    fixed_part_with_quotes = f'"{fixed_part}"'
-    queries = [fixed_part_with_quotes] + [
-        f"{fixed_part_with_quotes} {keyword.strip()}" for keyword in keywords
-    ]
+# Keywords list (shared between endpoints)
+KEYWORDS = [
+    "interdittiva", "processo", "processi", "indagine", "indagini", "udienza", "udienze",
+    "peculato", "corruzione", "arresto", "condanna", "condanne", "giudice", "giudici",
+    "tribunale", "tribunali", "droga", "riciclaggio", "mafia", "mafioso", "camorra", "ndrangheta",
+    "truffa", "truffe", "frode", "frodi", "reato", "reati", "carcere", "detenuto",
+    "detenuti", "ricettazione", "reclusione", "condannata", "condannato", "condannati", "calunnia",
+    "calunnie", "arrestato", "arrestati", "arresti", "Diffamazione", "Concussione",
+    "furto", "furti", "rapina", "rapine", "tributario", "tributaria", "penale", "penali",
+    "giudiziario", "giudiziaria", "sessuale", "sessuali", "fallimento", "fallimenti",
+    "Contraffazione", "Copyright", "Stalking", "Abusivismo", "Bancarotta", "omicidio",
+    "omicidi", "omicida", "Danneggiamento", "Ricettazione", "Estorsione", "estorsioni",
+    "armi", "Arma", "prostituzione", "sentenza", "sentenze", "deposizione", "deposizioni",
+    "inchiesta", "inchieste", "sequestro", "sequestri", "arrestata", "denunciato",
+    "denunciati", "denunciata", "assoluzione", "assolto", "assolta", "assoluzioni",
+    "assolti", "assolte", "indagato", "indagata", "illecito", "illeciti", "illecite",
+    "antimafia", "giudizio", "sequestrato", "sequestrata", "querelare", "querela",
+    "querelato", "querelata", "querelati", "querelate", "perquisito", "perquisita",
+    "perquisiti", "perquisite", "perquisizione", "perquisizioni", "evasione", "evasioni",
+    "associazione a delinquere", "galera", "fraudolenta", "tangente", "tangenti",
+    "patteggia", "patteggiamento", "patteggiamenti", "turbativa"
+]
 
-    all_results_df = pd.DataFrame()
 
-    # Loop through each query and perform a search across the first 10 pages
-    for query in queries:
-        data_rows = []
+def calculate_batch_size(total_rows):
+    """
+    Calculate optimal batch size for progress updates based on total number of rows.
+    """
+    if total_rows < 20:
+        return 2  # Update every 2 rows
+    elif total_rows < 100:
+        return 5  # Update every 5 rows
+    else:
+        return 10  # Update every 10 rows
 
-        for page in range(10):  # 10 pages → results 1–100
-            params = {
-                "engine": "google_light",
-                "q": query,
-                "location": "Italy",
-                "hl": "it",
-                "gl": "it",
-                "api_key": api_key,
-                "start": page * 10,
-                "num": 10
-            }
 
-            search = GoogleSearch(params)
-            results = search.get_dict()
-            organic_results = results.get("organic_results", [])
+@app.route('/api/search-stream', methods=['GET'])
+def search_stream():
+    """
+    Server-Sent Events endpoint for search with real-time progress updates.
+    """
+    def generate():
+        fixed_part = request.args.get('fixedPart', '')
+        keywords = request.args.get('keywords', '').split(',')
+        additional_words = request.args.get('additionalWords', '').split(',')
+        case_description = request.args.get('caseDescription', '').strip()
 
-            for i, result in enumerate(organic_results, start=1):
-                progressive_position = page * 10 + i
+        fixed_part_with_quotes = f'"{fixed_part}"'
+        queries = [fixed_part_with_quotes] + [
+            f"{fixed_part_with_quotes} {keyword.strip()}" for keyword in keywords if keyword.strip()
+        ]
 
-                data_rows.append({
-                    "Query": query,
-                    "Posizione": progressive_position,
-                    "Titolo": result.get("title"),
-                    "Snippet": result.get("snippet"),
-                    "URL": result.get("link"),
-                    "Dominio": result.get("displayed_link"),
-                    "Data": result.get("date")
-                })
+        total_queries = len(queries)
+        total_pages = 10
 
-        # Create and sort dataframe
-        query_df = pd.DataFrame(data_rows)
-        query_df = query_df.sort_values(by="Posizione").reset_index(drop=True)
+        # Progress distribution:
+        # Phase 1: Google searches (0-60%)
+        # Phase 2: Keyword filtering (60-65%)
+        # Phase 3: OpenAI filtering (65-95%)
+        # Phase 4: File generation (95-100%)
 
-        # Append
-        all_results_df = pd.concat([all_results_df, query_df], ignore_index=True)
+        all_results_df = pd.DataFrame()
 
-    # Clean the 'Dominio' column
-    all_results_df['Dominio'] = all_results_df['Dominio'].apply(
-        lambda x: x.split('›')[0]
-        .replace('https://', '')
-        .replace('http://', '')
-        .replace('www.', '')
-        .strip() if isinstance(x, str) else x
-    )
+        # PHASE 1: Google Searches (0-60%)
+        total_search_steps = total_queries * total_pages
+        current_search_step = 0
 
-    # Remove quotes from Query
-    all_results_df['Query'] = all_results_df['Query'].str.replace('"', '')
+        for query_idx, query in enumerate(queries):
+            data_rows = []
 
-    # Remove duplicates by URL
-    all_results_df = all_results_df.drop_duplicates(subset='URL', keep='first').reset_index(drop=True)
+            for page in range(total_pages):
+                current_search_step += 1
+                progress = (current_search_step / total_search_steps) * 60  # 0-60%
 
-    # Keywords list
-    words = [
-        "interdittiva", "processo", "processi", "indagine", "indagini", "udienza", "udienze",
-        "peculato", "corruzione", "arresto", "condanna", "condanne", "giudice", "giudici",
-        "tribunale", "tribunali", "droga", "riciclaggio", "mafia", "mafioso", "camorra", "ndrangheta",
-        "truffa", "truffe", "frode", "frodi", "reato", "reati", "carcere", "detenuto",
-        "detenuti", "ricettazione", "reclusione", "condannata", "condannato", "condannati", "calunnia",
-        "calunnie", "arrestato", "arrestati", "arresti", "Diffamazione", "Concussione",
-        "furto", "furti", "rapina", "rapine", "tributario", "tributaria", "penale", "penali",
-        "giudiziario", "giudiziaria", "sessuale", "sessuali", "fallimento", "fallimenti",
-        "Contraffazione", "Copyright", "Stalking", "Abusivismo", "Bancarotta", "omicidio",
-        "omicidi", "omicida", "Danneggiamento", "Ricettazione", "Estorsione", "estorsioni",
-        "armi", "Arma", "prostituzione", "sentenza", "sentenze", "deposizione", "deposizioni",
-        "inchiesta", "inchieste", "sequestro", "sequestri", "arrestata", "denunciato",
-        "denunciati", "denunciata", "assoluzione", "assolto", "assolta", "assoluzioni",
-        "assolti", "assolte", "indagato", "indagata", "illecito", "illeciti", "illecite",
-        "antimafia", "giudizio", "sequestrato", "sequestrata", "querelare", "querela",
-        "querelato", "querelata", "querelati", "querelate", "perquisito", "perquisita",
-        "perquisiti", "perquisite", "perquisizione", "perquisizioni", "evasione", "evasioni",
-        "associazione a delinquere", "galera", "fraudolenta", "tangente", "tangenti",
-        "patteggia", "patteggiamento", "patteggiamenti", "turbativa"
-    ]
+                yield f"data: {json.dumps({'type': 'progress', 'progress': progress, 'message': f'Ricerca Google: query {query_idx + 1}/{total_queries}, pagina {page + 1}/{total_pages}'})}\n\n"
 
-    words.extend([w.strip() for w in additional_words if w.strip()])
-    pattern = r'\b(?:' + '|'.join(words) + r')\b'
+                params = {
+                    "engine": "google_light",
+                    "q": query,
+                    "location": "Italy",
+                    "hl": "it",
+                    "gl": "it",
+                    "api_key": api_key,
+                    "start": page * 10,
+                    "num": 10
+                }
 
-    df1 = all_results_df[
-        all_results_df['Snippet'].str.contains(pattern, case=False, na=False) |
-        all_results_df['Titolo'].str.contains(pattern, case=False, na=False)
-    ]
+                search = GoogleSearch(params)
+                results = search.get_dict()
+                organic_results = results.get("organic_results", [])
 
-    # Apply OpenAI filter only if case_description is provided and df1 is not empty
-    if case_description and not df1.empty:
-        df1["ai_keep"] = df1.apply(
-            lambda r: is_relevant_with_openai(
-                r["Titolo"], 
-                r["Snippet"], 
-                r["URL"], 
-                fixed_part,
-                case_description
-            ),
-            axis=1,
+                for i, result in enumerate(organic_results, start=1):
+                    progressive_position = page * 10 + i
+                    data_rows.append({
+                        "Query": query,
+                        "Posizione": progressive_position,
+                        "Titolo": result.get("title"),
+                        "Snippet": result.get("snippet"),
+                        "URL": result.get("link"),
+                        "Dominio": result.get("displayed_link"),
+                        "Data": result.get("date")
+                    })
+
+            query_df = pd.DataFrame(data_rows)
+            query_df = query_df.sort_values(by="Posizione").reset_index(drop=True)
+            all_results_df = pd.concat([all_results_df, query_df], ignore_index=True)
+
+        # PHASE 2: Keyword filtering (60-65%)
+        yield f"data: {json.dumps({'type': 'progress', 'progress': 62, 'message': 'Filtraggio per parole chiave...'})}\n\n"
+
+        # Clean the 'Dominio' column
+        all_results_df['Dominio'] = all_results_df['Dominio'].apply(
+            lambda x: x.split('›')[0]
+            .replace('https://', '')
+            .replace('http://', '')
+            .replace('www.', '')
+            .strip() if isinstance(x, str) else x
         )
-        # Keep only rows where ai_keep is True
-        df1 = df1[df1["ai_keep"]].drop(columns=["ai_keep"])
 
-    # Create CSV
-    csv_string = df1.to_csv(index=False)
+        # Remove quotes from Query
+        all_results_df['Query'] = all_results_df['Query'].str.replace('"', '')
 
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv',
-                                     encoding='utf-8', newline='') as tmp:
-        tmp.write(csv_string)
-        tmp_path = tmp.name
+        # Remove duplicates by URL
+        all_results_df = all_results_df.drop_duplicates(subset='URL', keep='first').reset_index(drop=True)
 
-    return jsonify({
-        "message": "Ricerca completata con successo", 
-        "file": os.path.basename(tmp_path),
-        "results_count": len(df1)
+        # Build pattern with additional words
+        words = KEYWORDS.copy()
+        words.extend([w.strip() for w in additional_words if w.strip()])
+        pattern = r'\b(?:' + '|'.join(words) + r')\b'
+
+        df1 = all_results_df[
+            all_results_df['Snippet'].str.contains(pattern, case=False, na=False) |
+            all_results_df['Titolo'].str.contains(pattern, case=False, na=False)
+        ]
+
+        yield f"data: {json.dumps({'type': 'progress', 'progress': 65, 'message': f'Trovati {len(df1)} risultati da analizzare con AI...'})}\n\n"
+
+        # PHASE 3: OpenAI filtering (65-95%)
+        if case_description and not df1.empty:
+            total_ai_rows = len(df1)
+            ai_keep_results = []
+            
+            # Calculate optimal batch size based on total rows
+            batch_size = calculate_batch_size(total_ai_rows)
+
+            for idx, (row_idx, row) in enumerate(df1.iterrows()):
+                is_relevant = is_relevant_with_openai(
+                    row["Titolo"],
+                    row["Snippet"],
+                    row["URL"],
+                    fixed_part,
+                    case_description
+                )
+                ai_keep_results.append(is_relevant)
+                
+                # Only send update at batch intervals or at the end
+                if (idx + 1) % batch_size == 0 or (idx + 1) == total_ai_rows:
+                    ai_progress = 65 + ((idx + 1) / total_ai_rows) * 30
+                    yield f"data: {json.dumps({'type': 'progress', 'progress': ai_progress, 'message': f'Analisi AI: {idx + 1}/{total_ai_rows} risultati'})}\n\n"
+
+            df1 = df1.copy()
+            df1["ai_keep"] = ai_keep_results
+            df1 = df1[df1["ai_keep"]].drop(columns=["ai_keep"])
+
+        # PHASE 4: File generation (95-100%)
+        yield f"data: {json.dumps({'type': 'progress', 'progress': 97, 'message': 'Generazione file CSV...'})}\n\n"
+
+        # Create CSV
+        csv_string = df1.to_csv(index=False)
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv',
+                                         encoding='utf-8', newline='') as tmp:
+            tmp.write(csv_string)
+            tmp_path = tmp.name
+
+        yield f"data: {json.dumps({'type': 'complete', 'file': os.path.basename(tmp_path), 'results_count': len(df1)})}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no'
     })
 
 @app.route('/api/download/<filename>', methods=['GET'])
@@ -219,6 +272,7 @@ def download(filename):
         as_attachment=True,
         download_name=f"{filename}"
     )
+
 
 if __name__ == '__main__':
     app.run(debug=True)
