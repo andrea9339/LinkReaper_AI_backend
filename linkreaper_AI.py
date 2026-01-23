@@ -10,7 +10,7 @@ import json
 app = Flask(__name__)
 
 # Restrict CORS to allow only the frontend on Vercel
-CORS(app, resources={r"/*": {"origins": "https://linkreaperai.vercel.app/"}})
+CORS(app, resources={r"/*": {"origins": ["https://linkreaperai.vercel.app"]}}, supports_credentials=True)
 
 # Retrieve API keys from environment variables
 api_key = os.getenv('SERPAPI_KEY')
@@ -98,18 +98,6 @@ KEYWORDS = [
     "associazione a delinquere", "galera", "fraudolenta", "tangente", "tangenti",
     "patteggia", "patteggiamento", "patteggiamenti", "turbativa"
 ]
-
-
-def calculate_batch_size(total_rows):
-    """
-    Calculate optimal batch size for progress updates based on total number of rows.
-    """
-    if total_rows < 20:
-        return 2  # Update every 2 rows
-    elif total_rows < 100:
-        return 5  # Update every 5 rows
-    else:
-        return 10  # Update every 10 rows
 
 
 @app.route('/api/search-stream', methods=['GET'])
@@ -217,11 +205,13 @@ def search_stream():
         if case_description and not df1.empty:
             total_ai_rows = len(df1)
             ai_keep_results = []
-            
-            # Calculate optimal batch size based on total rows
-            batch_size = calculate_batch_size(total_ai_rows)
 
             for idx, (row_idx, row) in enumerate(df1.iterrows()):
+                # Calculate progress: 65% + (current/total * 30%) = 65-95%
+                ai_progress = 65 + ((idx + 1) / total_ai_rows) * 30
+
+                yield f"data: {json.dumps({'type': 'progress', 'progress': ai_progress, 'message': f'Analisi AI: {idx + 1}/{total_ai_rows} risultati'})}\n\n"
+
                 is_relevant = is_relevant_with_openai(
                     row["Titolo"],
                     row["Snippet"],
@@ -230,11 +220,6 @@ def search_stream():
                     case_description
                 )
                 ai_keep_results.append(is_relevant)
-                
-                # Only send update at batch intervals or at the end
-                if (idx + 1) % batch_size == 0 or (idx + 1) == total_ai_rows:
-                    ai_progress = 65 + ((idx + 1) / total_ai_rows) * 30
-                    yield f"data: {json.dumps({'type': 'progress', 'progress': ai_progress, 'message': f'Analisi AI: {idx + 1}/{total_ai_rows} risultati'})}\n\n"
 
             df1 = df1.copy()
             df1["ai_keep"] = ai_keep_results
@@ -257,6 +242,121 @@ def search_stream():
         'Cache-Control': 'no-cache',
         'X-Accel-Buffering': 'no'
     })
+
+
+@app.route('/api/search', methods=['POST'])
+def search():
+    """
+    Original search endpoint (without progress tracking).
+    Kept for backward compatibility.
+    """
+    data = request.json
+    fixed_part = data['fixedPart']
+    keywords = data['keywords'].split(',')
+    additional_words = data.get('additionalWords', '').split(',')
+    case_description = data.get('caseDescription', '').strip()
+
+    fixed_part_with_quotes = f'"{fixed_part}"'
+    queries = [fixed_part_with_quotes] + [
+        f"{fixed_part_with_quotes} {keyword.strip()}" for keyword in keywords
+    ]
+
+    all_results_df = pd.DataFrame()
+
+    # Loop through each query and perform a search across the first 10 pages
+    for query in queries:
+        data_rows = []
+
+        for page in range(10):  # 10 pages → results 1–100
+            params = {
+                "engine": "google_light",
+                "q": query,
+                "location": "Italy",
+                "hl": "it",
+                "gl": "it",
+                "api_key": api_key,
+                "start": page * 10,
+                "num": 10
+            }
+
+            search = GoogleSearch(params)
+            results = search.get_dict()
+            organic_results = results.get("organic_results", [])
+
+            for i, result in enumerate(organic_results, start=1):
+                progressive_position = page * 10 + i
+
+                data_rows.append({
+                    "Query": query,
+                    "Posizione": progressive_position,
+                    "Titolo": result.get("title"),
+                    "Snippet": result.get("snippet"),
+                    "URL": result.get("link"),
+                    "Dominio": result.get("displayed_link"),
+                    "Data": result.get("date")
+                })
+
+        # Create and sort dataframe
+        query_df = pd.DataFrame(data_rows)
+        query_df = query_df.sort_values(by="Posizione").reset_index(drop=True)
+
+        # Append
+        all_results_df = pd.concat([all_results_df, query_df], ignore_index=True)
+
+    # Clean the 'Dominio' column
+    all_results_df['Dominio'] = all_results_df['Dominio'].apply(
+        lambda x: x.split('›')[0]
+        .replace('https://', '')
+        .replace('http://', '')
+        .replace('www.', '')
+        .strip() if isinstance(x, str) else x
+    )
+
+    # Remove quotes from Query
+    all_results_df['Query'] = all_results_df['Query'].str.replace('"', '')
+
+    # Remove duplicates by URL
+    all_results_df = all_results_df.drop_duplicates(subset='URL', keep='first').reset_index(drop=True)
+
+    # Build pattern with additional words
+    words = KEYWORDS.copy()
+    words.extend([w.strip() for w in additional_words if w.strip()])
+    pattern = r'\b(?:' + '|'.join(words) + r')\b'
+
+    df1 = all_results_df[
+        all_results_df['Snippet'].str.contains(pattern, case=False, na=False) |
+        all_results_df['Titolo'].str.contains(pattern, case=False, na=False)
+    ]
+
+    # Apply OpenAI filter only if case_description is provided and df1 is not empty
+    if case_description and not df1.empty:
+        df1["ai_keep"] = df1.apply(
+            lambda r: is_relevant_with_openai(
+                r["Titolo"],
+                r["Snippet"],
+                r["URL"],
+                fixed_part,
+                case_description
+            ),
+            axis=1,
+        )
+        # Keep only rows where ai_keep is True
+        df1 = df1[df1["ai_keep"]].drop(columns=["ai_keep"])
+
+    # Create CSV
+    csv_string = df1.to_csv(index=False)
+
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv',
+                                     encoding='utf-8', newline='') as tmp:
+        tmp.write(csv_string)
+        tmp_path = tmp.name
+
+    return jsonify({
+        "message": "Ricerca completata con successo",
+        "file": os.path.basename(tmp_path),
+        "results_count": len(df1)
+    })
+
 
 @app.route('/api/download/<filename>', methods=['GET'])
 def download(filename):
