@@ -10,7 +10,14 @@ import json
 app = Flask(__name__)
 
 # Restrict CORS to allow only the frontend on Vercel
-CORS(app, resources={r"/api/*": {"origins": ["https://linkreaperai.vercel.app"]}})
+CORS(app, resources={
+    r"/*": {
+        "origins": ["https://linkreaperai.vercel.app"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"],
+        "supports_credentials": False
+    }
+})
 # Retrieve API keys from environment variables
 api_key = os.getenv('SERPAPI_KEY')
 openai_api_key = os.getenv('OPENAI_API_KEY')
