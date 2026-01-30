@@ -17,10 +17,6 @@ CORS(
     methods=["GET", "POST", "OPTIONS"],
 )
 
-@app.route("/api/health", methods=["GET"])
-def health():
-    return jsonify({"ok": True}), 20
-
 # Retrieve API keys from environment variables
 api_key = os.getenv('SERPAPI_KEY')
 openai_api_key = os.getenv('OPENAI_API_KEY')
@@ -44,6 +40,7 @@ Sei un assistente legale incaricato di valutare la pertinenza di un articolo onl
 
 ## Obiettivo
 Devi decidere se un link è rilevante e potenzialmente lesivo per il SOGGETTO relativamente al CASO fornito.
+Utilizza i dati del link (titolo, snippet) per prendere la decisione.
 Nota: un contenuto resta potenzialmente lesivo anche se il SOGGETTO è stato assolto o archiviato.
 
 ## Dati
@@ -59,12 +56,13 @@ Il contenuto di questo link è POTENZIALMENTE rilevante per il caso descritto?
 
 ## Regole di Valutazione
 - Rispondi "SI" se:
-  1. Il risultato si riferisce con alta probabilità allo STESSO soggetto del caso (persona o società).
-  2. Collega il soggetto al caso oppure a fatti negativi/giudiziari/reputazionali coerenti col caso.
+  1. Il risultato si riferisce con alta probabilità allo STESSO soggetto del CASO (persona o società).
+  2. Collega il SOGGETTO al CASO oppure a fatti negativi/giudiziari/reputazionali coerenti col CASO.
 - Rispondi "NO" se:
-  - Il risultato riguarda chiaramente un altro soggetto (es. omonimo, altra società).
-  - Non ha collegamento con il caso.
-- Se le informazioni (titolo, snippet, url) non sono sufficienti a stabilire che si tratta dello stesso soggetto, rispondi "NO".
+  - Il risultato riguarda chiaramente un altro SOGGETTO (es. omonimo, cognome uguale ma nome diverso, altra società).
+  - Non ha collegamento con il CASO.
+- Se non sei certo (confidenza < 0,9) che si tratti dello stesso SOGGETTO usando solo titolo e snippet, DEVI aprire l’URL e leggere la pagina.
+- Se non sei certo (confidenza < 0,9) che sia relativo al CASO usando solo titolo e snippet, DEVI aprire l’URL e leggere la pagina.
 
 ## Output
 Rispondi SOLO con:
@@ -73,8 +71,9 @@ NO
 """
     try:
         response = client.responses.create(
-            model="gpt-5-mini",
-            reasoning={"effort": "minimal"},
+            model="gpt-5",
+            reasoning={"effort": "medium"},
+            tools=[{"type": "web_search"}],
             input=prompt
         )
         answer = response.output_text.strip().upper()
