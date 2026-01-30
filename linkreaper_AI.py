@@ -173,7 +173,8 @@ def search():
         "querelato", "querelata", "querelati", "querelate", "perquisito", "perquisita",
         "perquisiti", "perquisite", "perquisizione", "perquisizioni", "evasione", "evasioni",
         "associazione a delinquere", "galera", "fraudolenta", "tangente", "tangenti",
-        "patteggia", "patteggiamento", "patteggiamenti", "turbativa"
+        "patteggia", "patteggiamento", "patteggiamenti", "turbativa",  "intercettazione", "intercettazioni"
+         "imputato", "imputata", "imputati", "imputate"
     ]
 
     words.extend([w.strip() for w in additional_words if w.strip()])
