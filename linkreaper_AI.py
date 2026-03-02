@@ -71,7 +71,7 @@ NO
 """
     try:
         response = client.responses.create(
-            model="gpt-5",
+            model="gpt-5-mini",
             reasoning={"effort": "medium"},
             tools=[{"type": "web_search"}],
             input=prompt
@@ -156,25 +156,25 @@ def search():
     # Keywords list
     words = [
         "interdittiva", "processo", "processi", "indagine", "indagini", "udienza", "udienze",
-        "peculato", "corruzione", "arresto", "condanna", "condanne", "giudice", "giudici",
-        "tribunale", "tribunali", "droga", "riciclaggio", "mafia", "mafioso", "camorra", "ndrangheta",
-        "truffa", "truffe", "frode", "frodi", "reato", "reati", "carcere", "detenuto",
-        "detenuti", "ricettazione", "reclusione", "condannata", "condannato", "condannati", "calunnia",
-        "calunnie", "arrestato", "arrestati", "arresti", "Diffamazione", "Concussione",
-        "furto", "furti", "rapina", "rapine", "tributario", "tributaria", "penale", "penali",
-        "giudiziario", "giudiziaria", "sessuale", "sessuali", "fallimento", "fallimenti",
-        "Contraffazione", "Copyright", "Stalking", "Abusivismo", "Bancarotta", "omicidio",
-        "omicidi", "omicida", "Danneggiamento", "Ricettazione", "Estorsione", "estorsioni",
-        "armi", "Arma", "prostituzione", "sentenza", "sentenze", "deposizione", "deposizioni",
-        "inchiesta", "inchieste", "sequestro", "sequestri", "arrestata", "denunciato",
-        "denunciati", "denunciata", "assoluzione", "assolto", "assolta", "assoluzioni",
-        "assolti", "assolte", "indagato", "indagata", "illecito", "illeciti", "illecite",
-        "antimafia", "giudizio", "sequestrato", "sequestrata", "querelare", "querela",
-        "querelato", "querelata", "querelati", "querelate", "perquisito", "perquisita",
-        "perquisiti", "perquisite", "perquisizione", "perquisizioni", "evasione", "evasioni",
-        "associazione a delinquere", "galera", "fraudolenta", "tangente", "tangenti",
-        "patteggia", "patteggiamento", "patteggiamenti", "turbativa",  "intercettazione", "intercettazioni"
-         "imputato", "imputata", "imputati", "imputate"
+         "peculato", "corruzione", "arresto", "condanna", "condanne", "giudice", "giudici",
+         "tribunale", "tribunali", "droga", "riciclaggio", "mafia", "mafioso", "camorra", "ndrangheta",
+         "truffa", "truffe", "frode", "frodi", "reato", "reati", "carcere", "detenuto",
+         "detenuti", "ricettazione", "reclusione", "condannata", "condannato", "condannati", "calunnia",
+         "calunnie", "arrestato", "arrestati", "arresti", "Diffamazione", "Concussione",
+         "furto", "furti", "rapina", "rapine", "tributario", "tributaria", "penale", "penali",
+         "giudiziario", "giudiziaria", "sessuale", "sessuali", "fallimento", "fallimenti",
+         "Contraffazione", "Copyright", "Stalking", "Abusivismo", "Bancarotta", "omicidio",
+         "omicidi", "omicida", "Danneggiamento", "Ricettazione", "Estorsione", "estorsioni",
+         "armi", "Arma", "prostituzione", "sentenza", "sentenze", "deposizione", "deposizioni",
+         "inchiesta", "inchieste", "sequestro", "sequestri", "arrestata", "denunciato", 
+         "denunciati", "denunciata", "assoluzione", "assolto", "assolta", "assoluzioni",
+         "assolti", "assolte", "indagato", "indagata", "illecito", "illeciti", "illecite",
+         "antimafia", "giudizio", "sequestrato", "sequestrata", "querelare", "querela",
+         "querelato", "querelata", "querelati", "querelate", "perquisito", "perquisita",
+         "perquisiti", "perquisite", "perquisizione", "perquisizioni", "evasione", "evasioni",
+         "associazione a delinquere", "galera", "fraudolenta", "tangente", "tangenti", "patteggia",
+         "patteggiamento", "patteggiamenti", "turbativa", "intercettazione", "intercettazioni"
+         "imputato", "imputata", "imputati", "imputate", "prescrizione"
     ]
 
     words.extend([w.strip() for w in additional_words if w.strip()])
@@ -230,4 +230,5 @@ def download(filename):
     )
 
 if __name__ == '__main__':
+
     app.run(debug=True)
