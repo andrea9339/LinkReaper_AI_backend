@@ -117,8 +117,8 @@ NO
 """
     try:
         response = client.responses.create(
-            model="gpt-5",
-            reasoning={"effort": "medium"},
+            model="gpt-5-luna",
+            reasoning={"effort": "xhigh"},
             tools=[{"type": "web_search"}],
             input=prompt
         )
