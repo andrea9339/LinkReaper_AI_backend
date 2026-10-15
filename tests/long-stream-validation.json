@@ -1,0 +1,232 @@
+{
+  "date": "2026-10-15",
+  "backend_revision": "b993534",
+  "hosting": "Render Free, Frankfurt",
+  "server": "Gunicorn 23.0.0, one gthread worker, four request threads, --timeout 400",
+  "external_apis": "Synthetic responses only; no paid API calls.",
+  "contentType": "text/event-stream; charset=utf-8",
+  "download": {
+    "bytes": 220,
+    "header": "Query,Posizione,Titolo,Snippet,URL,Dominio,Data",
+    "rows": 3,
+    "status": 200
+  },
+  "elapsedSeconds": 924.094,
+  "events": [
+    {
+      "seconds": 0,
+      "type": "accepted"
+    },
+    {
+      "completed": 0,
+      "phase": "google",
+      "seconds": 0,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 1,
+      "phase": "google",
+      "seconds": 905,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 2,
+      "phase": "google",
+      "seconds": 905,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 3,
+      "phase": "google",
+      "seconds": 906,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 4,
+      "phase": "google",
+      "seconds": 906,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 5,
+      "phase": "google",
+      "seconds": 906,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 6,
+      "phase": "google",
+      "seconds": 906,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 7,
+      "phase": "google",
+      "seconds": 906,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 8,
+      "phase": "google",
+      "seconds": 907,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 9,
+      "phase": "google",
+      "seconds": 907,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 10,
+      "phase": "google",
+      "seconds": 907,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 11,
+      "phase": "google",
+      "seconds": 907,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 12,
+      "phase": "google",
+      "seconds": 907,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 13,
+      "phase": "google",
+      "seconds": 908,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 14,
+      "phase": "google",
+      "seconds": 908,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 15,
+      "phase": "google",
+      "seconds": 908,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 16,
+      "phase": "google",
+      "seconds": 908,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 17,
+      "phase": "google",
+      "seconds": 908,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 18,
+      "phase": "google",
+      "seconds": 909,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 19,
+      "phase": "google",
+      "seconds": 909,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 20,
+      "phase": "google",
+      "seconds": 909,
+      "total": 20,
+      "type": "progress"
+    },
+    {
+      "completed": 0,
+      "phase": "ai",
+      "seconds": 909,
+      "total": 4,
+      "type": "progress"
+    },
+    {
+      "completed": 1,
+      "phase": "ai",
+      "seconds": 910,
+      "total": 4,
+      "type": "progress"
+    },
+    {
+      "completed": 2,
+      "phase": "ai",
+      "seconds": 911,
+      "total": 4,
+      "type": "progress"
+    },
+    {
+      "completed": 3,
+      "phase": "ai",
+      "seconds": 913,
+      "total": 4,
+      "type": "progress"
+    },
+    {
+      "completed": 4,
+      "phase": "ai",
+      "seconds": 924,
+      "total": 4,
+      "type": "progress"
+    },
+    {
+      "completed": null,
+      "phase": "csv",
+      "seconds": 924,
+      "total": null,
+      "type": "progress"
+    },
+    {
+      "ai_failures": 1,
+      "seconds": 924,
+      "type": "complete"
+    }
+  ],
+  "failedHealthChecks": 0,
+  "healthChecks": 46,
+  "heartbeats": 75,
+  "httpStatus": 200,
+  "maxGapMs": 12112,
+  "maxHealthMs": 118,
+  "startedAt": "2026-10-15T12:24:41.385Z",
+  "status": "complete",
+  "terminal": {
+    "ai_failures": 1,
+    "ai_skipped": null,
+    "elapsed_seconds": 924,
+    "file": "tmpn7u_jtoq.csv",
+    "message": "Ricerca completata con successo",
+    "results_count": 3,
+    "type": "complete"
+  }
+}

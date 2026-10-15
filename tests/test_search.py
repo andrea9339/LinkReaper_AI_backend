@@ -288,6 +288,10 @@ class SearchTests(unittest.TestCase):
         self.assertNotEqual(results["Cliente A"][-1]["file"], results["Cliente B"][-1]["file"])
         for subject, events in results.items():
             self.assertEqual(events[-1]["type"], "complete")
+            google = [e for e in events if e.get("phase") == "google"]
+            self.assertEqual([e["completed"] for e in google], list(range(21)))
+            ai = [e for e in events if e.get("phase") == "ai"]
+            self.assertEqual(ai[-1]["stats"]["succeeded"], 4)
             self.assertIn(subject, self.read_csv(events[-1]))
             self.assertNotIn("Cliente B" if subject == "Cliente A" else "Cliente A", self.read_csv(events[-1]))
 
@@ -329,6 +333,50 @@ class SearchTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(ai.call_count, 2)
             self.assertEqual(errors, ["cancelled"])
+
+    def test_large_ai_workload_keeps_twenty_workers_and_accurate_counts(self):
+        df = backend.pd.DataFrame([
+            {"Titolo": "Processo", "Snippet": "Caso", "URL": f"https://example.test/{i}"}
+            for i in range(1000)
+        ])
+        lock = threading.Lock()
+        full_pool = threading.Event()
+        release = threading.Event()
+        active = 0
+        peak = 0
+        calls = 0
+        completed = []
+        outputs = []
+
+        def ai(**kwargs):
+            nonlocal active, peak, calls
+            with lock:
+                calls += 1
+                active += 1
+                peak = max(peak, active)
+                if active == backend.MAX_WORKERS:
+                    full_pool.set()
+            release.wait(timeout=3)
+            with lock:
+                active -= 1
+            return SimpleNamespace(output_text="SI")
+
+        def report(phase, message, count, total, **details):
+            self.assertEqual(total, 1000)
+            completed.append(count)
+
+        with patch.object(backend.client.responses, "create", side_effect=ai):
+            thread = threading.Thread(target=lambda: outputs.append(backend.filter_with_openai_parallel(
+                df, "Cliente", "Caso", report=report)))
+            thread.start()
+            self.assertTrue(full_pool.wait(timeout=3))
+            release.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(calls, 1000)
+        self.assertEqual(peak, 20)
+        self.assertEqual(completed, list(range(1, 1001)))
+        self.assertEqual(list(outputs[0]["URL"]), list(df["URL"]))
 
     def test_health_cors_and_missing_download(self):
         health = self.client.get("/api/health")
