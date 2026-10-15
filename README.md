@@ -54,6 +54,13 @@ or `error`. Google page counts advance after each response has been handled.
 AI counts advance once per completed link, after retries. Cleanup and keyword
 filtering still run, without a separate progress phase.
 
+SerpAPI can return a successful Google page with no results and an `error`
+message explaining that nothing was found. Pages with
+`search_metadata.status: "Success"` are handled normally, including empty
+pages, so other queries and collected results are preserved. Failed provider
+responses still stop the search. Logs record the query index, page, and a
+validated archive search ID when available, without logging query text or keys.
+
 AI filtering evaluates one link at a time, in input order. It uses `gpt-6-luna`
 with reasoning effort `high` and the `web_search` tool, matching the reference
 script's model settings. Retries finish before the next link starts. A link is

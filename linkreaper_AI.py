@@ -256,7 +256,16 @@ def run_search(data, on_progress=None, stop_event=None):
             search = GoogleSearch(params)
             results = search.get_dict()
             check_cancelled(stop_event)
-            if results.get("error"):
+            metadata = results.get("search_metadata") or {}
+            provider_status = metadata.get("status")
+            # SerpAPI also includes an error message on successful empty pages.
+            if provider_status == "Error" or (results.get("error") and provider_status != "Success"):
+                search_id = metadata.get("id", "")
+                if not (isinstance(search_id, str) and len(search_id) == 24
+                        and all(c in "0123456789abcdef" for c in search_id)):
+                    search_id = "unknown"
+                app.logger.error("Google search failed (query_index=%d, page=%d, search_id=%s).",
+                                 query_index, page + 1, search_id)
                 raise RuntimeError("The search provider returned an error.")
             organic_results = results.get("organic_results") or []
 
@@ -377,8 +386,8 @@ def search():
     try:
         result = run_search(data)
         return jsonify({key: result[key] for key in ("message", "file", "results_count")})
-    except Exception:
-        app.logger.error("Search processing failed.")
+    except Exception as exc:
+        app.logger.error("Search processing failed (%s).", type(exc).__name__)
         return jsonify({"error": "La ricerca non è riuscita. Riprova più tardi.",
                         "code": "search_failed"}), 500
 
@@ -411,8 +420,8 @@ def search_stream():
             publish({"type": "complete", **result})
         except SearchCancelled:
             pass
-        except Exception:
-            app.logger.error("Streamed search processing failed.")
+        except Exception as exc:
+            app.logger.error("Streamed search processing failed (%s).", type(exc).__name__)
             publish({"type": "error", "code": "search_failed",
                      "message": "La ricerca non è riuscita. Riprova più tardi."})
 

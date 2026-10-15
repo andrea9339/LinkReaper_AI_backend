@@ -1,5 +1,26 @@
 # Validation — 15 October 2026
 
+## Successful empty Google pages
+
+The affected Google Light response was retrieved from SerpAPI's cache and
+archive. It had `search_metadata.status: "Success"`, no `organic_results`,
+and the message `Google Light hasn't returned any results for this query.`
+The earlier guard treated every nonempty `error` field as a failed request,
+stopping the search before AI filtering. The account had available quota;
+the diagnostic replay used cached responses and left the quota unchanged.
+
+The backend now respects the provider's successful status, counts empty pages,
+and continues the remaining queries. Actual provider errors still stop work.
+Safe failure logs include the query index, page, validated archive search ID,
+and exception type, without query text, credentials, or raw provider messages.
+
+All 18 backend tests passed. The regression first failed against the previous
+guard, then passed after the fix. It covers Google and Google Light empty-page
+messages, a spelling-suggestion state, preserved results from earlier and later
+queries, page counts, JSON/stream CSV parity, and entirely empty output.
+Additional checks confirm that failed or unknown provider responses still
+produce an error and do not leak provider data into events or logs.
+
 ## Sequential AI update
 
 All 16 backend tests passed with the pinned production dependencies. The AI

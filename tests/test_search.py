@@ -156,8 +156,57 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(events[-1]["ai_skipped"], "no_description")
         self.assertEqual(events[-1]["results_count"], 4)
 
+    def test_successful_empty_google_pages_keep_results_and_continue_queries(self):
+        for state, message in [
+                ("Fully empty", "Google hasn't returned any results for this query."),
+                ("Showing results for exact spelling despite spelling suggestion",
+                 "Google Light hasn't returned any results for this query.")]:
+            with self.subTest(state=state):
+                self.google_calls.clear()
+                empty_page = {
+                    "search_metadata": {"status": "Success"},
+                    "search_information": {"organic_results_state": state},
+                    "error": message,
+                }
+
+                def google(params):
+                    self.google_calls.append(params.copy())
+                    result = recorded_google(params) if params["start"] == 0 else empty_page
+                    return SimpleNamespace(get_dict=lambda: result)
+
+                with patch.object(backend, "GoogleSearch", side_effect=google):
+                    events = self.stream()
+                    legacy = self.client.post("/api/search", json=PAYLOAD).get_json()
+                self.assertEqual(events[-1]["type"], "complete")
+                self.assertEqual(events[-1]["results_count"], 4)
+                self.assertEqual(self.read_csv(legacy), self.read_csv(events[-1]))
+                rows = list(csv.DictReader(io.StringIO(self.read_csv(events[-1]))))
+                self.assertEqual([r["URL"] for r in rows], ["https://example.test/" + p
+                                                          for p in ["a", "custom", "b", "c"]])
+                google_updates = [e for e in events if e.get("phase") == "google"]
+                self.assertEqual([e["completed"] for e in google_updates], list(range(21)))
+                self.assertEqual(len(self.google_calls), 40)
+
+    def test_failed_google_status_stops_search_without_leaking_provider_data(self):
+        for provider_result in [
+                {"search_metadata": {"status": "Error", "id": "0123456789abcdef01234567"},
+                 "error": "PRIVATE API KEY AND CASE"},
+                {"search_metadata": {"status": "Error", "id": "PRIVATE API KEY AND CASE"}},
+                {"error": "PRIVATE API KEY AND CASE"}]:
+            with self.subTest(provider_result=provider_result), patch.object(
+                    backend, "GoogleSearch", return_value=SimpleNamespace(get_dict=lambda: provider_result)), \
+                    self.assertLogs(backend.app.logger, level="ERROR") as logs:
+                events = self.stream()
+                self.assertEqual(events[-1]["type"], "error")
+                self.assertNotIn("PRIVATE", json.dumps(events))
+                self.assertNotIn("PRIVATE", "\n".join(logs.output))
+                self.assertIn("query_index=1, page=1", "\n".join(logs.output))
+        self.assertEqual(list(Path(self.directory.name).glob("*.csv")), [])
+
     def test_empty_google_and_no_candidates_and_all_rejected(self):
-        for google_result in [{}, {"organic_results": None}, {"organic_results": [
+        for google_result in [{}, {"organic_results": None}, {
+                "search_metadata": {"status": "Success"},
+                "error": "Google Light hasn't returned any results for this query."}, {"organic_results": [
                 {"title": "Sport", "snippet": None, "link": "https://example.test/empty"}]}]:
             with self.subTest(google_result=google_result), patch.object(
                     backend, "GoogleSearch", return_value=SimpleNamespace(get_dict=lambda: google_result)):
