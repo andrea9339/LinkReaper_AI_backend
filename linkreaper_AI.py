@@ -234,7 +234,9 @@ def search():
         f"{fixed_part_with_quotes} {keyword.strip()}" for keyword in keywords
     ]
 
-    all_results_df = pd.DataFrame()
+    # Keep columns defined even when queries return no organic results
+    RESULT_COLUMNS = ["Query", "Posizione", "Titolo", "Snippet", "URL", "Dominio", "Data"]
+    all_results_df = pd.DataFrame(columns=RESULT_COLUMNS)
 
     # Loop through each query and perform a search across the first 10 pages
     for query in queries:
@@ -254,7 +256,7 @@ def search():
 
             search = GoogleSearch(params)
             results = search.get_dict()
-            organic_results = results.get("organic_results", [])
+            organic_results = results.get("organic_results") or []
 
             for i, result in enumerate(organic_results, start=1):
                 progressive_position = page * 10 + i
@@ -270,7 +272,7 @@ def search():
                 })
 
         # Create and sort dataframe
-        query_df = pd.DataFrame(data_rows)
+        query_df = pd.DataFrame(data_rows, columns=RESULT_COLUMNS)
         query_df = query_df.sort_values(by="Posizione").reset_index(drop=True)
 
         # Append
