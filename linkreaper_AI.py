@@ -9,7 +9,6 @@ import threading
 import time
 import json
 import queue
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
@@ -34,10 +33,6 @@ if not openai_api_key:
 # Initialize OpenAI client
 client = OpenAI(api_key=openai_api_key)
 
-# ============================================================================
-# PARALLEL PROCESSING CONFIGURATION
-# ============================================================================
-MAX_WORKERS = 20      # Adjust between 20-50 based on performance
 RETRY_ATTEMPTS = 2    # Number of retries for failed requests
 RETRY_DELAY = 2       # Seconds to wait before retry
 HEARTBEAT_SECONDS = 12
@@ -53,39 +48,33 @@ def check_cancelled(stop_event):
         raise SearchCancelled()
 
 
-# Thread-safe counters for tracking
+# Counters belong to one search and are updated by its sequential producer.
 class ProgressTracker:
     def __init__(self):
-        self.lock = threading.Lock()
         self.succeeded = 0
         self.failed = 0
         self.retried = 0
         self.rate_limit_errors = 0
 
     def increment_success(self):
-        with self.lock:
-            self.succeeded += 1
+        self.succeeded += 1
 
     def increment_failure(self):
-        with self.lock:
-            self.failed += 1
+        self.failed += 1
 
     def increment_retry(self):
-        with self.lock:
-            self.retried += 1
+        self.retried += 1
 
     def increment_rate_limit(self):
-        with self.lock:
-            self.rate_limit_errors += 1
+        self.rate_limit_errors += 1
 
     def get_stats(self):
-        with self.lock:
-            return {
-                'succeeded': self.succeeded,
-                'failed': self.failed,
-                'retried': self.retried,
-                'rate_limit_errors': self.rate_limit_errors
-            }
+        return {
+            'succeeded': self.succeeded,
+            'failed': self.failed,
+            'retried': self.retried,
+            'rate_limit_errors': self.rate_limit_errors
+        }
 
 
 def is_relevant_with_openai(title, snippet, url, fixed_part, case_description, attempt=1, tracker=None,
@@ -132,8 +121,8 @@ NO
     check_cancelled(stop_event)
     try:
         response = client.responses.create(
-            model="gpt-5-luna",
-            reasoning={"effort": "xhigh"},
+            model="gpt-6-luna",
+            reasoning={"effort": "high"},
             tools=[{"type": "web_search"}],
             input=prompt
         )
@@ -175,68 +164,24 @@ NO
             return True
 
 
-def process_single_row(row_data, tracker, stop_event=None):
-    """
-    Process a single row with OpenAI API.
-    Returns (index, is_relevant_bool)
-    """
-    idx, title, snippet, url, fixed_part, case_description = row_data
-
-    is_relevant = is_relevant_with_openai(
-        title, snippet, url, fixed_part, case_description,
-        attempt=1, tracker=tracker, stop_event=stop_event
-    )
-
-    return (idx, is_relevant)
-
-
-def filter_with_openai_parallel(df, fixed_part, case_description, max_workers=MAX_WORKERS,
-                               report=None, stop_event=None, tracker=None):
-    """
-    Apply OpenAI filtering in parallel using ThreadPoolExecutor.
-
-    Args:
-        df: DataFrame to filter
-        fixed_part: The subject/person name
-        case_description: Description of the case
-        max_workers: Maximum number of parallel threads
-
-    Returns:
-        Filtered DataFrame
-    """
+def filter_with_openai(df, fixed_part, case_description, report=None, stop_event=None, tracker=None):
+    """Assess one link at a time, in input order, and report finished links."""
     if df.empty:
         return df
 
     tracker = tracker or ProgressTracker()
 
-    # Prepare data for parallel processing
-    row_data_list = [
-        (idx, row["Titolo"], row["Snippet"], row["URL"], fixed_part, case_description)
-        for idx, row in df.iterrows()
-    ]
-
-    results = {}
-
-    print(f"Processing {len(row_data_list)} requests with {max_workers} parallel workers...")
-
-    executor = ThreadPoolExecutor(max_workers=max_workers)
-    try:
+    keep = []
+    print(f"Processing {len(df)} links sequentially...")
+    for completed, (_, row) in enumerate(df.iterrows(), start=1):
         check_cancelled(stop_event)
-        futures = {
-            executor.submit(process_single_row, row_data, tracker, stop_event): row_data[0]
-            for row_data in row_data_list
-        }
-
-        for future in as_completed(futures):
-            check_cancelled(stop_event)
-            idx, is_relevant = future.result()
-            results[idx] = is_relevant
-            if report:
-                report("ai", "Analisi AI in corso", len(results), len(row_data_list),
-                       stats=tracker.get_stats())
-    finally:
-        cancelled = stop_event is not None and stop_event.is_set()
-        executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
+        keep.append(is_relevant_with_openai(
+            row["Titolo"], row["Snippet"], row["URL"], fixed_part, case_description,
+            tracker=tracker, stop_event=stop_event
+        ))
+        check_cancelled(stop_event)
+        if report:
+            report("ai", "Analisi AI in corso", completed, len(df), stats=tracker.get_stats())
 
     # Log statistics
     stats = tracker.get_stats()
@@ -244,7 +189,7 @@ def filter_with_openai_parallel(df, fixed_part, case_description, max_workers=MA
           f"Retried: {stats['retried']} | Rate limit hits: {stats['rate_limit_errors']}")
 
     # Apply results and filter
-    filtered_df = df.loc[df.index.map(results)].copy()
+    filtered_df = df.loc[keep].copy()
     return filtered_df
 
 
@@ -387,14 +332,14 @@ def run_search(data, on_progress=None, stop_event=None):
         all_results_df['Titolo'].str.contains(pattern, case=False, na=False)
     ]
 
-    # Apply parallel OpenAI filter only if case_description is provided and df1 is not empty
+    # Apply sequential OpenAI filtering only when there is a case and eligible links.
     tracker = ProgressTracker()
     ai_skipped = None
     if case_description and not df1.empty:
-        print(f"Starting AI filtering on {len(df1)} results with {MAX_WORKERS} parallel workers...")
+        print(f"Starting sequential AI filtering on {len(df1)} results...")
         report("ai", "Analisi AI in corso", 0, len(df1), stats=tracker.get_stats())
-        df1 = filter_with_openai_parallel(df1, fixed_part, case_description,
-                                         report=report, stop_event=stop_event, tracker=tracker)
+        df1 = filter_with_openai(df1, fixed_part, case_description,
+                                report=report, stop_event=stop_event, tracker=tracker)
         print(f"Filtered down to {len(df1)} relevant results")
 
     else:

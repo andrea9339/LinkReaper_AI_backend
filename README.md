@@ -54,6 +54,12 @@ or `error`. Google page counts advance after each response has been handled.
 AI counts advance once per completed link, after retries. Cleanup and keyword
 filtering still run, without a separate progress phase.
 
+AI filtering evaluates one link at a time, in input order. It uses `gpt-6-luna`
+with reasoning effort `high` and the `web_search` tool, matching the reference
+script's model settings. Retries finish before the next link starts. A link is
+retained if its AI assessment fails after all retries; the completion event
+reports how many links could not be verified.
+
 The progress bar measures the current phase: Google search, AI analysis, or CSV
 preparation. CSV preparation is indeterminate. `complete` is emitted after the
 CSV file has closed. It includes the existing result fields, elapsed seconds,
@@ -63,7 +69,7 @@ The legacy JSON endpoint and CSV download keep their existing response format.
 Each request owns its queue, counters, and cancellation event. The queue keeps
 at most 32 pending updates; slow readers cannot block the search. Heartbeat
 comments are sent every 12 seconds while external calls are pending. Closing
-the connection stops work at safe boundaries and prevents queued AI calls from
+the connection stops work at safe boundaries and prevents subsequent AI calls from
 starting; external calls already running can still finish. There is no refresh
 recovery or automatic resubmission.
 
@@ -71,8 +77,8 @@ recovery or automatic resubmission.
 
 The repository's `gunicorn.conf.py` is loaded automatically by Gunicorn when
 started from the repository root. It uses one `gthread` worker and four request
-threads, sized for one active client plus downloads and health checks. The AI
-pool remains at 20 workers. Gunicorn 23's main threaded loop reports worker
+threads, sized for one active client plus downloads and health checks. Each
+search evaluates its AI links sequentially. Gunicorn 23's main threaded loop reports worker
 liveness independently of a long-running request.
 
 The existing Render start command can stay:
@@ -94,8 +100,9 @@ python -m unittest discover -s tests -v
 ```
 
 Tests use synthetic Google and AI responses, covering CSV parity, counts,
-out-of-order AI completion, retries and fallback, empty results, input errors,
-heartbeats, disconnected readers, bounded queues, and concurrent isolation.
+sequential AI calls, retries and fallback, empty results, input errors,
+heartbeats during Google and AI calls, disconnected readers, bounded queues,
+and independent progress for overlapping requests.
 They do not consume API quota.
 
 For an isolated test service only, run

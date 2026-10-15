@@ -1,5 +1,32 @@
 # Validation — 15 October 2026
 
+## Sequential AI update
+
+All 16 backend tests passed with the pinned production dependencies. The AI
+filter now makes every call on the search's calling thread, in input order,
+without a worker pool. The 1,000-link check verifies call order, output order,
+and counters. Separate checks verify that retries finish before the next link,
+AI failures retain the link, rejected links are removed, and cancellation
+prevents the next call. Heartbeats continue while an AI call is waiting, with
+the completed count unchanged. JSON/stream CSV parity and the existing Google,
+validation, queue, and download checks also pass.
+
+A single real Responses API request used the updated backend's exact request
+payload with a synthetic Example Domain case and the production OpenAI
+credential, kept out of test fixtures and reports. The request used
+`gpt-6-luna`, reasoning effort `high`, and `web_search`. It returned HTTP 200,
+status `completed`, and `SI` after 16.1 seconds. Model access checks returned
+HTTP 404 (`model_not_found`) for the previous `gpt-5-luna` setting and HTTP 200
+for `gpt-6-luna`. This verifies access and one successful assessment; it does
+not measure filtering quality across customer cases. No Google search quota
+was consumed by this live API check.
+
+## Earlier streaming validation
+
+The checks below predate the sequential AI update. Their long-wait measurements
+remain evidence for the streaming transport, not a timing measurement of the
+updated AI filter.
+
 All 15 backend tests passed with the pinned production dependencies. The suite
 includes 1,000 AI candidates, exactly 20 concurrent workers, accurate completion
 counts, retained row ordering, retries, fallback, empty output, safe failures,

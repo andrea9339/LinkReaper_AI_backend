@@ -117,20 +117,18 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(updates[-1]["phase"], "csv")
         self.assertIsNone(updates[-1]["total"])
 
-    def test_out_of_order_ai_retries_failures_and_row_order(self):
+    def test_sequential_ai_retries_failures_and_row_order(self):
         attempts = {}
-        lock = threading.Lock()
+        calls = []
 
         def ai(**kwargs):
             url = kwargs["input"].split("  - URL: ")[1].splitlines()[0]
-            self.assertEqual(kwargs["model"], "gpt-5-luna")
-            self.assertEqual(kwargs["reasoning"], {"effort": "xhigh"})
+            self.assertEqual(kwargs["model"], "gpt-6-luna")
+            self.assertEqual(kwargs["reasoning"], {"effort": "high"})
             self.assertEqual(kwargs["tools"], [{"type": "web_search"}])
-            with lock:
-                attempts[url] = attempts.get(url, 0) + 1
-                attempt = attempts[url]
-            if url.endswith("/a"):
-                time.sleep(0.03)
+            calls.append(url.rsplit("/", 1)[-1])
+            attempts[url] = attempts.get(url, 0) + 1
+            attempt = attempts[url]
             if url.endswith("/b") or (url.endswith("/c") and attempt == 1):
                 raise RuntimeError("429 rate limit: PRIVATE CASE AND KEY")
             return SimpleNamespace(output_text="NO" if url.endswith("custom") else "SI")
@@ -139,6 +137,7 @@ class SearchTests(unittest.TestCase):
             updates = []
             result = backend.run_search(PAYLOAD, on_progress=updates.append)
         ai_updates = [e for e in updates if e["phase"] == "ai"]
+        self.assertEqual(calls, ["a", "custom", "b", "b", "b", "c", "c"])
         self.assertEqual([e["completed"] for e in ai_updates], [0, 1, 2, 3, 4])
         self.assertTrue(all(e["total"] == 4 for e in ai_updates))
         self.assertEqual(ai_updates[-1]["stats"],
@@ -302,63 +301,95 @@ class SearchTests(unittest.TestCase):
         result = backend.run_search({**PAYLOAD, "caseDescription": ""}, on_progress=broken_report)
         self.assertEqual(result["results_count"], 4)
 
-    def test_disconnect_during_ai_prevents_queued_calls(self):
-        entered = threading.Barrier(3)
+    def test_disconnect_during_ai_prevents_next_call(self):
+        entered = threading.Event()
         release = threading.Event()
         stopped = threading.Event()
         errors = []
+        completed = []
         df = backend.pd.DataFrame([
             {"Titolo": "Processo", "Snippet": "Caso", "URL": f"https://example.test/{i}"}
             for i in range(8)
         ])
 
         def slow_ai(**kwargs):
-            entered.wait(timeout=2)
+            entered.set()
             release.wait(timeout=2)
             return SimpleNamespace(output_text="SI")
 
         def run():
             try:
-                backend.filter_with_openai_parallel(df, "Cliente", "Caso", max_workers=2, stop_event=stopped)
+                backend.filter_with_openai(df, "Cliente", "Caso", stop_event=stopped,
+                                           report=lambda *args, **kwargs: completed.append(args))
             except backend.SearchCancelled:
                 errors.append("cancelled")
 
         with patch.object(backend.client.responses, "create", side_effect=slow_ai) as ai:
             thread = threading.Thread(target=run)
             thread.start()
-            entered.wait(timeout=2)
+            self.assertTrue(entered.wait(timeout=2))
             stopped.set()
             release.set()
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
-            self.assertEqual(ai.call_count, 2)
+            self.assertEqual(ai.call_count, 1)
             self.assertEqual(errors, ["cancelled"])
+            self.assertEqual(completed, [])
 
-    def test_large_ai_workload_keeps_twenty_workers_and_accurate_counts(self):
+    def test_ai_wait_sends_heartbeats_without_advancing_progress(self):
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        original_run = backend.run_search
+
+        def slow_ai(**kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return SimpleNamespace(output_text="SI")
+
+        def observe_run(*args, **kwargs):
+            try:
+                return original_run(*args, **kwargs)
+            finally:
+                finished.set()
+
+        with patch.object(backend, "HEARTBEAT_SECONDS", 0.02), patch.object(
+                backend.client.responses, "create", side_effect=slow_ai) as ai, patch.object(
+                backend, "run_search", side_effect=observe_run):
+            response = self.client.post("/api/search-stream", json=PAYLOAD, buffered=False)
+            try:
+                iterator = iter(response.response)
+                for chunk in iterator:
+                    if chunk.startswith(b"data: "):
+                        event = json.loads(chunk[6:])
+                        if event.get("phase") == "ai":
+                            self.assertEqual(event["completed"], 0)
+                            self.assertEqual(event["total"], 4)
+                            break
+                else:
+                    self.fail("No AI progress event received")
+                self.assertTrue(entered.wait(timeout=1))
+                self.assertEqual(next(iterator), b": heartbeat\n\n")
+            finally:
+                response.close()
+                release.set()
+            self.assertTrue(finished.wait(timeout=1))
+            self.assertEqual(ai.call_count, 1)
+        self.assertEqual(list(Path(self.directory.name).glob("*.csv")), [])
+
+    def test_large_ai_workload_runs_in_order_on_calling_thread(self):
         df = backend.pd.DataFrame([
             {"Titolo": "Processo", "Snippet": "Caso", "URL": f"https://example.test/{i}"}
             for i in range(1000)
         ])
-        lock = threading.Lock()
-        full_pool = threading.Event()
-        release = threading.Event()
-        active = 0
-        peak = 0
-        calls = 0
+        caller_thread = threading.get_ident()
+        urls = []
         completed = []
-        outputs = []
+        tracker = backend.ProgressTracker()
 
         def ai(**kwargs):
-            nonlocal active, peak, calls
-            with lock:
-                calls += 1
-                active += 1
-                peak = max(peak, active)
-                if active == backend.MAX_WORKERS:
-                    full_pool.set()
-            release.wait(timeout=3)
-            with lock:
-                active -= 1
+            self.assertEqual(threading.get_ident(), caller_thread)
+            urls.append(kwargs["input"].split("  - URL: ")[1].splitlines()[0])
             return SimpleNamespace(output_text="SI")
 
         def report(phase, message, count, total, **details):
@@ -366,17 +397,12 @@ class SearchTests(unittest.TestCase):
             completed.append(count)
 
         with patch.object(backend.client.responses, "create", side_effect=ai):
-            thread = threading.Thread(target=lambda: outputs.append(backend.filter_with_openai_parallel(
-                df, "Cliente", "Caso", report=report)))
-            thread.start()
-            self.assertTrue(full_pool.wait(timeout=3))
-            release.set()
-            thread.join(timeout=5)
-            self.assertFalse(thread.is_alive())
-            self.assertEqual(calls, 1000)
-        self.assertEqual(peak, 20)
+            output = backend.filter_with_openai(df, "Cliente", "Caso", report=report, tracker=tracker)
+        self.assertEqual(urls, list(df["URL"]))
+        self.assertEqual(tracker.get_stats(),
+                         {"succeeded": 1000, "failed": 0, "retried": 0, "rate_limit_errors": 0})
         self.assertEqual(completed, list(range(1, 1001)))
-        self.assertEqual(list(outputs[0]["URL"]), list(df["URL"]))
+        self.assertEqual(list(output["URL"]), list(df["URL"]))
 
     def test_health_cors_and_missing_download(self):
         health = self.client.get("/api/health")
