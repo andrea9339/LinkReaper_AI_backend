@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, Response, request, jsonify, send_file
 from flask_cors import CORS
 import os
 import pandas as pd
@@ -7,6 +7,8 @@ from openai import OpenAI
 import tempfile
 import threading
 import time
+import json
+import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
@@ -38,6 +40,17 @@ client = OpenAI(api_key=openai_api_key)
 MAX_WORKERS = 20      # Adjust between 20-50 based on performance
 RETRY_ATTEMPTS = 2    # Number of retries for failed requests
 RETRY_DELAY = 2       # Seconds to wait before retry
+HEARTBEAT_SECONDS = 12
+RESULT_COLUMNS = ["Query", "Posizione", "Titolo", "Snippet", "URL", "Dominio", "Data"]
+
+
+class SearchCancelled(Exception):
+    pass
+
+
+def check_cancelled(stop_event):
+    if stop_event is not None and stop_event.is_set():
+        raise SearchCancelled()
 
 
 # Thread-safe counters for tracking
@@ -75,7 +88,8 @@ class ProgressTracker:
             }
 
 
-def is_relevant_with_openai(title, snippet, url, fixed_part, case_description, attempt=1, tracker=None):
+def is_relevant_with_openai(title, snippet, url, fixed_part, case_description, attempt=1, tracker=None,
+                           stop_event=None):
     """
     Use OpenAI to determine if a search result is relevant to the case.
     Includes retry logic for robustness.
@@ -115,6 +129,7 @@ Rispondi SOLO con:
 SI
 NO
 """
+    check_cancelled(stop_event)
     try:
         response = client.responses.create(
             model="gpt-5-luna",
@@ -143,21 +158,24 @@ NO
 
             # Wait longer for rate limit errors
             wait_time = RETRY_DELAY * (2 if is_rate_limit else 1) * attempt
-            time.sleep(wait_time)
+            if stop_event is None:
+                time.sleep(wait_time)
+            elif stop_event.wait(wait_time):
+                raise SearchCancelled()
 
             return is_relevant_with_openai(
                 title, snippet, url, fixed_part, case_description,
-                attempt + 1, tracker
+                attempt + 1, tracker, stop_event
             )
         else:
             # Failed after all retries — default to keeping the result
             if tracker:
                 tracker.increment_failure()
-            print(f"⚠️  Failed after {RETRY_ATTEMPTS} attempts: {error_msg[:100]}")
+            print(f"AI assessment failed after retries ({type(e).__name__}); keeping the link.")
             return True
 
 
-def process_single_row(row_data, tracker):
+def process_single_row(row_data, tracker, stop_event=None):
     """
     Process a single row with OpenAI API.
     Returns (index, is_relevant_bool)
@@ -166,13 +184,14 @@ def process_single_row(row_data, tracker):
 
     is_relevant = is_relevant_with_openai(
         title, snippet, url, fixed_part, case_description,
-        attempt=1, tracker=tracker
+        attempt=1, tracker=tracker, stop_event=stop_event
     )
 
     return (idx, is_relevant)
 
 
-def filter_with_openai_parallel(df, fixed_part, case_description, max_workers=MAX_WORKERS):
+def filter_with_openai_parallel(df, fixed_part, case_description, max_workers=MAX_WORKERS,
+                               report=None, stop_event=None, tracker=None):
     """
     Apply OpenAI filtering in parallel using ThreadPoolExecutor.
 
@@ -188,7 +207,7 @@ def filter_with_openai_parallel(df, fixed_part, case_description, max_workers=MA
     if df.empty:
         return df
 
-    tracker = ProgressTracker()
+    tracker = tracker or ProgressTracker()
 
     # Prepare data for parallel processing
     row_data_list = [
@@ -198,32 +217,63 @@ def filter_with_openai_parallel(df, fixed_part, case_description, max_workers=MA
 
     results = {}
 
-    print(f"🚀 Processing {len(row_data_list)} requests with {max_workers} parallel workers...")
+    print(f"Processing {len(row_data_list)} requests with {max_workers} parallel workers...")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        check_cancelled(stop_event)
         futures = {
-            executor.submit(process_single_row, row_data, tracker): row_data[0]
+            executor.submit(process_single_row, row_data, tracker, stop_event): row_data[0]
             for row_data in row_data_list
         }
 
         for future in as_completed(futures):
+            check_cancelled(stop_event)
             idx, is_relevant = future.result()
             results[idx] = is_relevant
+            if report:
+                report("ai", "Analisi AI in corso", len(results), len(row_data_list),
+                       stats=tracker.get_stats())
+    finally:
+        cancelled = stop_event is not None and stop_event.is_set()
+        executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
 
     # Log statistics
     stats = tracker.get_stats()
-    print(f"📊 AI Filter — Succeeded: {stats['succeeded']} | Failed: {stats['failed']} | "
+    print(f"AI Filter - Succeeded: {stats['succeeded']} | Failed: {stats['failed']} | "
           f"Retried: {stats['retried']} | Rate limit hits: {stats['rate_limit_errors']}")
 
     # Apply results and filter
-    df["ai_keep"] = df.index.map(results)
-    filtered_df = df[df["ai_keep"]].drop(columns=["ai_keep"])
+    filtered_df = df.loc[df.index.map(results)].copy()
     return filtered_df
 
 
-@app.route('/api/search', methods=['POST'])
-def search():
-    data = request.json
+def read_search_data():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ValueError("Invia i parametri di ricerca in formato JSON.")
+    for name in ("fixedPart", "keywords", "additionalWords", "caseDescription"):
+        value = data.get(name, "" if name in ("additionalWords", "caseDescription") else None)
+        if not isinstance(value, str):
+            raise ValueError(f"Il campo {name} deve essere un testo.")
+    if not data["fixedPart"].strip():
+        raise ValueError("Inserisci il nome del soggetto da cercare.")
+    return data
+
+
+def run_search(data, on_progress=None, stop_event=None):
+    started = time.monotonic()
+
+    def report(phase, message, completed=None, total=None, **details):
+        if on_progress is not None:
+            try:
+                on_progress({"type": "progress", "phase": phase, "message": message,
+                             "completed": completed, "total": total,
+                             "elapsed_seconds": round(time.monotonic() - started, 1), **details})
+            except Exception:
+                app.logger.warning("Progress update could not be delivered.")
+
+    check_cancelled(stop_event)
     fixed_part = data['fixedPart']
     keywords = data['keywords'].split(',')
     additional_words = data.get('additionalWords', '').split(',')
@@ -235,14 +285,18 @@ def search():
     ]
 
     # Keep columns defined even when queries return no organic results
-    RESULT_COLUMNS = ["Query", "Posizione", "Titolo", "Snippet", "URL", "Dominio", "Data"]
     all_results_df = pd.DataFrame(columns=RESULT_COLUMNS)
+    total_pages = len(queries) * 10
+    completed_pages = 0
+    report("google", "Ricerca Google in corso", 0, total_pages,
+           query_index=1, query_total=len(queries), page=1)
 
     # Loop through each query and perform a search across the first 10 pages
-    for query in queries:
+    for query_index, query in enumerate(queries, start=1):
         data_rows = []
 
         for page in range(10):  # 10 pages → results 1–100
+            check_cancelled(stop_event)
             params = {
                 "engine": "google_light",
                 "q": query,
@@ -256,6 +310,9 @@ def search():
 
             search = GoogleSearch(params)
             results = search.get_dict()
+            check_cancelled(stop_event)
+            if results.get("error"):
+                raise RuntimeError("The search provider returned an error.")
             organic_results = results.get("organic_results") or []
 
             for i, result in enumerate(organic_results, start=1):
@@ -270,6 +327,9 @@ def search():
                     "Dominio": result.get("displayed_link"),
                     "Data": result.get("date")
                 })
+            completed_pages += 1
+            report("google", "Ricerca Google in corso", completed_pages, total_pages,
+                   query_index=query_index, query_total=len(queries), page=page + 1)
 
         # Create and sort dataframe
         query_df = pd.DataFrame(data_rows, columns=RESULT_COLUMNS)
@@ -278,6 +338,8 @@ def search():
         # Append
         all_results_df = pd.concat([all_results_df, query_df], ignore_index=True)
 
+    check_cancelled(stop_event)
+    # Cleanup and keyword filtering intentionally have no separate progress phase.
     # Clean the 'Dominio' column
     all_results_df['Dominio'] = all_results_df['Dominio'].apply(
         lambda x: x.split('›')[0]
@@ -326,11 +388,23 @@ def search():
     ]
 
     # Apply parallel OpenAI filter only if case_description is provided and df1 is not empty
+    tracker = ProgressTracker()
+    ai_skipped = None
     if case_description and not df1.empty:
         print(f"Starting AI filtering on {len(df1)} results with {MAX_WORKERS} parallel workers...")
-        df1 = filter_with_openai_parallel(df1, fixed_part, case_description)
-        print(f"✨ Filtered down to {len(df1)} relevant results")
+        report("ai", "Analisi AI in corso", 0, len(df1), stats=tracker.get_stats())
+        df1 = filter_with_openai_parallel(df1, fixed_part, case_description,
+                                         report=report, stop_event=stop_event, tracker=tracker)
+        print(f"Filtered down to {len(df1)} relevant results")
 
+    else:
+        ai_skipped = "no_description" if not case_description else "no_candidates"
+        report("ai", "Analisi AI saltata: manca la descrizione del caso." if not case_description
+               else "Analisi AI saltata: nessun link da analizzare.", skipped=ai_skipped,
+               stats=tracker.get_stats())
+
+    check_cancelled(stop_event)
+    report("csv", "Preparazione del CSV")
     # Create CSV
     csv_string = df1.to_csv(index=False)
 
@@ -339,11 +413,95 @@ def search():
         tmp.write(csv_string)
         tmp_path = tmp.name
 
-    return jsonify({
+    return {
         "message": "Ricerca completata con successo",
         "file": os.path.basename(tmp_path),
-        "results_count": len(df1)
+        "results_count": len(df1),
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        "ai_failures": tracker.get_stats()["failed"],
+        "ai_skipped": ai_skipped,
+    }
+
+
+@app.route('/api/search', methods=['POST'])
+def search():
+    try:
+        data = read_search_data()
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "code": "invalid_request"}), 400
+    try:
+        result = run_search(data)
+        return jsonify({key: result[key] for key in ("message", "file", "results_count")})
+    except Exception:
+        app.logger.error("Search processing failed.")
+        return jsonify({"error": "La ricerca non è riuscita. Riprova più tardi.",
+                        "code": "search_failed"}), 500
+
+
+@app.route('/api/search-stream', methods=['POST'])
+def search_stream():
+    try:
+        data = read_search_data()
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "code": "invalid_request"}), 400
+
+    stopped = threading.Event()
+    updates = queue.Queue(maxsize=32)
+
+    def publish(event):
+        # Keep recent updates; a slow reader must never block the producer.
+        while not stopped.is_set():
+            try:
+                updates.put_nowait(event)
+                return
+            except queue.Full:
+                try:
+                    updates.get_nowait()
+                except queue.Empty:
+                    pass
+
+    def produce():
+        try:
+            result = run_search(data, on_progress=publish, stop_event=stopped)
+            publish({"type": "complete", **result})
+        except SearchCancelled:
+            pass
+        except Exception:
+            app.logger.error("Streamed search processing failed.")
+            publish({"type": "error", "code": "search_failed",
+                     "message": "La ricerca non è riuscita. Riprova più tardi."})
+
+    def encode(event):
+        return "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+
+    def events():
+        try:
+            yield encode({"type": "accepted", "version": 1,
+                          "message": "Connessione stabilita. Avvio della ricerca."})
+            threading.Thread(target=produce, name="search-producer", daemon=True).start()
+            while not stopped.is_set():
+                try:
+                    event = updates.get(timeout=HEARTBEAT_SECONDS)
+                except queue.Empty:
+                    yield ": heartbeat\n\n"
+                    continue
+                yield encode(event)
+                if event["type"] in ("complete", "error"):
+                    return
+        finally:
+            stopped.set()
+
+    response = Response(events(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-store, no-transform",
+        "X-Accel-Buffering": "no",
     })
+    response.call_on_close(stopped.set)
+    return response
+
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "search_stream_version": 1})
 
 
 @app.route('/api/download/<filename>', methods=['GET'])
