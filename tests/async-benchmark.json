@@ -1,0 +1,45 @@
+{
+  "sample": "tests\\fixtures\\ai_benchmark_enron.json",
+  "sample_sha256": "a6e183350f2a841a2b27bd6b81f8dbf33c6d241bf42e48909ba83a56884db080",
+  "subject": "Enron",
+  "case": "Frode contabile Enron e procedimenti giudiziari collegati allo scandalo.",
+  "model": "gpt-6-luna",
+  "reasoning": {
+    "effort": "high"
+  },
+  "tools": [
+    {
+      "type": "web_search"
+    }
+  ],
+  "max_retries": 3,
+  "system_certificates": true,
+  "runs": [
+    {
+      "concurrency": 1,
+      "evaluated": 100,
+      "kept": 100,
+      "excluded": 0,
+      "seconds": 227.62,
+      "links_per_minute": 26.36,
+      "succeeded": 100,
+      "failed": 0,
+      "retried": 0,
+      "rate_limit_errors": 0
+    },
+    {
+      "concurrency": 5,
+      "evaluated": 100,
+      "kept": 100,
+      "excluded": 0,
+      "seconds": 48.1,
+      "links_per_minute": 124.74,
+      "succeeded": 100,
+      "failed": 0,
+      "retried": 0,
+      "rate_limit_errors": 0
+    }
+  ],
+  "speedup": 4.73,
+  "classification_differences": []
+}

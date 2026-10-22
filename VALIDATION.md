@@ -1,3 +1,91 @@
+# Async AI validation — 22 October 2026
+
+The backend now evaluates up to five links concurrently using `AsyncOpenAI`.
+The earlier sequential and fallback behavior described below is historical.
+The current filter stops without producing a CSV when a row exhausts four API
+attempts. The Flask JSON and SSE routes and the CSV schema remain compatible.
+
+## Automated checks
+
+All 27 backend tests passed with Python 3.12.6, OpenAI 2.15.0, and pandas 2.3.3.
+The new tests exercise the actual SDK through a synthetic HTTP transport.
+They verify overlapping requests, a maximum of five active rows, sequential
+and concurrent CSV parity, duplicate and nonconsecutive indices, completions
+out of order, success on the fourth attempt, and failure after four attempts.
+
+Additional checks cover pending-task cancellation before client closure,
+disconnection during an HTTP request and a retry wait, direct task cancellation,
+local parser errors without retry, an uncapped 120-second `Retry-After` under a
+controlled clock, HTTP-date retry headers, invalid configuration, empty input,
+and no-description searches. Failed JSON and SSE searches produce no new CSV
+and preserve an existing file. An AST comparison with revision `32d82d2`
+confirmed that the full prompt is unchanged.
+
+## Real API benchmark
+
+The sample contains 100 distinct public Google results about Enron, collected
+once through SerpAPI and stored in `tests/fixtures/ai_benchmark_enron.json`.
+Both runs reused those same rows without repeating Google searches.
+Parameters were `gpt-6-luna`, reasoning `high`, `web_search`, the original prompt,
+three application retries, and zero SDK retries. Certificate verification used
+the Windows trust store for this local test. Production transport was unchanged.
+
+| Concurrency | Evaluated | AI duration | Links/minute | Kept | Excluded | Errors | Retries |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 100 | 227.62 s | 26.36 | 100 | 0 | 0 | 0 |
+| 5 | 100 | 48.10 s | 124.74 | 100 | 0 | 0 | 0 |
+
+Measured speedup was **4.73×**. The concurrent run completed all 100 assessments
+within the 180-second target. Neither run encountered rate limits or changed
+classification between runs. These timings cover the full AI filter, including
+client lifecycle, and exclude Google collection time.
+
+This is a performance measurement on one sample. All links in the sample were
+classified as relevant, so it does not establish rejection quality or latency
+for customer cases. Mocked tests separately verify positive and negative
+answers and their assignment to the correct rows. The raw benchmark report,
+sample hash, counters, and classification comparison are in
+[`tests/async-benchmark.json`](tests/async-benchmark.json).
+
+Reproduce the paid test with API environment variables configured:
+
+```sh
+python -m tests.benchmark_ai --sample tests/fixtures/ai_benchmark_enron.json
+```
+
+Append `--system-certificates` if this Windows environment requires its OS
+certificate store. This retains TLS verification and does not change backend
+configuration. The benchmark is opt-in and is not run by unittest discovery.
+
+## Frontend and review
+
+All 11 frontend parser tests, TypeScript checking, and the Next.js 16.0.10
+production build passed. Chromium exercised the production frontend against
+an isolated local backend using asynchronous synthetic provider responses.
+Google and AI counts were displayed, success followed CSV completion, and the
+browser saved a 245-byte CSV containing the expected header and three ordered
+rows. An exhausted AI retry budget displayed the safe server error with no
+success message or download button.
+
+The local frontend build used `NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:5055`
+and `NEXT_PUBLIC_ENABLE_SEARCH_PROGRESS=true`. These were command-scoped test
+values. No production environment files or deployment settings were changed.
+
+## Standards
+
+Independent Matt Pocock review found no documented-standard violations or
+justified code-smell findings in the implementation.
+
+## Spec
+
+Independent review found no missing or incorrect behavior against
+`MODIFICHE_FILTRO_AI_ASYNC.md` and the supporting plan. CLI-specific output and
+progress handling were adapted to the existing Flask routes and download flow.
+
+Review totals: Standards 0 findings. Spec 0 findings.
+
+---
+
 # Validation — 15 October 2026
 
 ## Successful empty Google pages

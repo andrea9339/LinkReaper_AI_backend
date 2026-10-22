@@ -3,7 +3,11 @@ from flask_cors import CORS
 import os
 import pandas as pd
 from serpapi import GoogleSearch
-from openai import OpenAI
+from openai import APIError, AsyncOpenAI
+import asyncio
+import math
+import random
+from email.utils import parsedate_to_datetime
 import tempfile
 import threading
 import time
@@ -30,11 +34,8 @@ if not api_key:
 if not openai_api_key:
     raise ValueError("Error: OPENAI_API_KEY environment variable is not set!")
 
-# Initialize OpenAI client
-client = OpenAI(api_key=openai_api_key)
-
-RETRY_ATTEMPTS = 2    # Number of retries for failed requests
-RETRY_DELAY = 2       # Seconds to wait before retry
+OPENAI_MAX_CONCURRENCY = 5
+OPENAI_MAX_RETRIES = 3
 HEARTBEAT_SECONDS = 12
 RESULT_COLUMNS = ["Query", "Posizione", "Titolo", "Snippet", "URL", "Dominio", "Data"]
 
@@ -43,12 +44,41 @@ class SearchCancelled(Exception):
     pass
 
 
+class OpenAIFilterError(RuntimeError):
+    """An API failure prevents exporting a fully assessed result."""
+
+
+def validate_openai_configuration():
+    if type(OPENAI_MAX_CONCURRENCY) is not int or OPENAI_MAX_CONCURRENCY < 1:
+        raise ValueError("OPENAI_MAX_CONCURRENCY deve essere un intero positivo.")
+    if type(OPENAI_MAX_RETRIES) is not int or OPENAI_MAX_RETRIES < 0:
+        raise ValueError("OPENAI_MAX_RETRIES deve essere un intero non negativo.")
+
+
+def retry_delay(error, attempt):
+    """Exponential backoff with jitter and an uncapped Retry-After minimum."""
+    delay = 2 ** (attempt - 1) + random.uniform(0, 0.5)
+    response = getattr(error, "response", None)
+    header = response.headers.get("Retry-After") if response is not None else None
+    if header is not None:
+        try:
+            retry_after = float(header)
+        except ValueError:
+            try:
+                retry_after = parsedate_to_datetime(header).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                retry_after = 0
+        if math.isfinite(retry_after) and retry_after >= 0:
+            delay = max(delay, retry_after)
+    return delay
+
+
 def check_cancelled(stop_event):
     if stop_event is not None and stop_event.is_set():
         raise SearchCancelled()
 
 
-# Counters belong to one search and are updated by its sequential producer.
+# Counters belong to one search and are updated on its event-loop thread.
 class ProgressTracker:
     def __init__(self):
         self.succeeded = 0
@@ -77,12 +107,8 @@ class ProgressTracker:
         }
 
 
-def is_relevant_with_openai(title, snippet, url, fixed_part, case_description, attempt=1, tracker=None,
-                           stop_event=None):
-    """
-    Use OpenAI to determine if a search result is relevant to the case.
-    Includes retry logic for robustness.
-    """
+async def is_relevant_with_openai(client, title, snippet, url, fixed_part, case_description):
+    """Evaluate one link, preserving the existing request and answer parser."""
     prompt = f"""
 Developer: # Ruolo e Obiettivo
 Sei un assistente legale incaricato di valutare la pertinenza di un articolo online rispetto a un caso.
@@ -118,79 +144,106 @@ Rispondi SOLO con:
 SI
 NO
 """
+    response = await client.responses.create(
+        model="gpt-6-luna",
+        reasoning={"effort": "high"},
+        tools=[{"type": "web_search"}],
+        input=prompt
+    )
+    answer = response.output_text.strip().upper()
+    return answer.startswith("SI")
+
+
+async def filter_with_openai(df, fixed_part, case_description, report=None, stop_event=None, tracker=None):
+    """Assess bounded concurrent rows and apply decisions in original row order."""
+    validate_openai_configuration()
     check_cancelled(stop_event)
-    try:
-        response = client.responses.create(
-            model="gpt-6-luna",
-            reasoning={"effort": "high"},
-            tools=[{"type": "web_search"}],
-            input=prompt
-        )
-        answer = response.output_text.strip().upper()
-        if tracker:
-            tracker.increment_success()
-        return answer.startswith("SI")
-
-    except Exception as e:
-        error_msg = str(e)
-
-        # Check if it's a rate limit error
-        is_rate_limit = "rate limit" in error_msg.lower() or "429" in error_msg
-
-        if is_rate_limit and tracker:
-            tracker.increment_rate_limit()
-
-        # Retry logic
-        if attempt <= RETRY_ATTEMPTS:
-            if tracker:
-                tracker.increment_retry()
-
-            # Wait longer for rate limit errors
-            wait_time = RETRY_DELAY * (2 if is_rate_limit else 1) * attempt
-            if stop_event is None:
-                time.sleep(wait_time)
-            elif stop_event.wait(wait_time):
-                raise SearchCancelled()
-
-            return is_relevant_with_openai(
-                title, snippet, url, fixed_part, case_description,
-                attempt + 1, tracker, stop_event
-            )
-        else:
-            # Failed after all retries — default to keeping the result
-            if tracker:
-                tracker.increment_failure()
-            print(f"AI assessment failed after retries ({type(e).__name__}); keeping the link.")
-            return True
-
-
-def filter_with_openai(df, fixed_part, case_description, report=None, stop_event=None, tracker=None):
-    """Assess one link at a time, in input order, and report finished links."""
     if df.empty:
-        return df
+        return df.copy()
 
     tracker = tracker or ProgressTracker()
+    started = time.monotonic()
+    semaphore = asyncio.Semaphore(OPENAI_MAX_CONCURRENCY)
+    keep_flags = [False] * len(df)
+    max_attempts = OPENAI_MAX_RETRIES + 1
+    failure = None
 
-    keep = []
-    print(f"Processing {len(df)} links sequentially...")
-    for completed, (_, row) in enumerate(df.iterrows(), start=1):
-        check_cancelled(stop_event)
-        keep.append(is_relevant_with_openai(
-            row["Titolo"], row["Snippet"], row["URL"], fixed_part, case_description,
-            tracker=tracker, stop_event=stop_event
-        ))
-        check_cancelled(stop_event)
-        if report:
-            report("ai", "Analisi AI in corso", completed, len(df), stats=tracker.get_stats())
+    async with AsyncOpenAI(api_key=openai_api_key, max_retries=0) as client:
+        async def evaluate(position, row):
+            nonlocal failure
+            # Keep the slot during retries too: at most five active rows.
+            async with semaphore:
+                if failure is not None:
+                    raise failure
+                for attempt in range(1, max_attempts + 1):
+                    check_cancelled(stop_event)
+                    try:
+                        keep = await is_relevant_with_openai(
+                            client, row.Titolo, row.Snippet, row.URL, fixed_part, case_description)
+                    except APIError as error:
+                        if getattr(error, "status_code", None) == 429:
+                            tracker.increment_rate_limit()
+                        if attempt == max_attempts:
+                            tracker.increment_failure()
+                            message = (f"Riga {position + 1}: {type(error).__name__}. "
+                                       f"Esauriti {max_attempts} tentativi. Nessun nuovo CSV prodotto.")
+                            print(message)
+                            failure = OpenAIFilterError(message)
+                            raise failure from None
+                        tracker.increment_retry()
+                        delay = retry_delay(error, attempt)
+                        print(f"Riga {position + 1}: {type(error).__name__}. "
+                              f"Retry {attempt}/{OPENAI_MAX_RETRIES}, "
+                              f"tentativo {attempt + 1}/{max_attempts} fra {delay:.2f} s.")
+                        await asyncio.sleep(delay)
+                    else:
+                        check_cancelled(stop_event)
+                        tracker.increment_success()
+                        return position, keep
 
-    # Log statistics
+        coordinator = asyncio.current_task()
+
+        async def watch_disconnect():
+            # The SSE generator sets a threading.Event from another thread.
+            while not stop_event.is_set():
+                await asyncio.sleep(0.1)
+            coordinator.cancel()
+
+        tasks = [asyncio.create_task(evaluate(position, row))
+                 for position, row in enumerate(df.itertuples(index=False))]
+        watcher = asyncio.create_task(watch_disconnect()) if stop_event is not None else None
+        try:
+            for completed, result in enumerate(asyncio.as_completed(tasks), start=1):
+                try:
+                    position, keep = await result
+                except OpenAIFilterError:
+                    if report:
+                        report("ai", "Analisi AI interrotta: nessun nuovo CSV prodotto.",
+                               completed, len(df), stats=tracker.get_stats())
+                    raise
+                check_cancelled(stop_event)
+                keep_flags[position] = keep
+                if report:
+                    report("ai", "Analisi AI in corso", completed, len(df), stats=tracker.get_stats())
+        except asyncio.CancelledError:
+            check_cancelled(stop_event)
+            raise
+        finally:
+            # Drain every task before closing the shared HTTP client.
+            pending = tasks + ([watcher] if watcher is not None else [])
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    elapsed = time.monotonic() - started
+    throughput = len(df) * 60 / elapsed if elapsed > 0 else 0
     stats = tracker.get_stats()
-    print(f"AI Filter - Succeeded: {stats['succeeded']} | Failed: {stats['failed']} | "
-          f"Retried: {stats['retried']} | Rate limit hits: {stats['rate_limit_errors']}")
-
-    # Apply results and filter
-    filtered_df = df.loc[keep].copy()
-    return filtered_df
+    print(f"AI: {len(df)} valutati, {sum(keep_flags)} mantenuti, {len(df) - sum(keep_flags)} esclusi. "
+          f"Concorrenza: {OPENAI_MAX_CONCURRENCY}. Durata: {elapsed:.2f} s. "
+          f"Link/min: {throughput:.1f}. "
+          f"Retry: {stats['retried']}. Rate limit: {stats['rate_limit_errors']}.")
+    return df.iloc[keep_flags].copy()
 
 
 def read_search_data():
@@ -341,14 +394,17 @@ def run_search(data, on_progress=None, stop_event=None):
         all_results_df['Titolo'].str.contains(pattern, case=False, na=False)
     ]
 
-    # Apply sequential OpenAI filtering only when there is a case and eligible links.
+    # Run an event loop within this synchronous Flask search worker.
     tracker = ProgressTracker()
     ai_skipped = None
+    ai_elapsed_seconds = 0.0
     if case_description and not df1.empty:
-        print(f"Starting sequential AI filtering on {len(df1)} results...")
+        print(f"Starting AI filtering on {len(df1)} results (concurrency={OPENAI_MAX_CONCURRENCY})...")
         report("ai", "Analisi AI in corso", 0, len(df1), stats=tracker.get_stats())
-        df1 = filter_with_openai(df1, fixed_part, case_description,
-                                report=report, stop_event=stop_event, tracker=tracker)
+        ai_started = time.monotonic()
+        df1 = asyncio.run(filter_with_openai(df1, fixed_part, case_description,
+                                            report=report, stop_event=stop_event, tracker=tracker))
+        ai_elapsed_seconds = round(time.monotonic() - ai_started, 2)
         print(f"Filtered down to {len(df1)} relevant results")
 
     else:
@@ -372,6 +428,7 @@ def run_search(data, on_progress=None, stop_event=None):
         "file": os.path.basename(tmp_path),
         "results_count": len(df1),
         "elapsed_seconds": round(time.monotonic() - started, 1),
+        "ai_elapsed_seconds": ai_elapsed_seconds,
         "ai_failures": tracker.get_stats()["failed"],
         "ai_skipped": ai_skipped,
     }
@@ -386,6 +443,8 @@ def search():
     try:
         result = run_search(data)
         return jsonify({key: result[key] for key in ("message", "file", "results_count")})
+    except OpenAIFilterError as exc:
+        return jsonify({"error": str(exc), "code": "ai_filter_failed"}), 500
     except Exception as exc:
         app.logger.error("Search processing failed (%s).", type(exc).__name__)
         return jsonify({"error": "La ricerca non è riuscita. Riprova più tardi.",
@@ -420,6 +479,8 @@ def search_stream():
             publish({"type": "complete", **result})
         except SearchCancelled:
             pass
+        except OpenAIFilterError as exc:
+            publish({"type": "error", "code": "ai_filter_failed", "message": str(exc)})
         except Exception as exc:
             app.logger.error("Streamed search processing failed (%s).", type(exc).__name__)
             publish({"type": "error", "code": "search_failed",

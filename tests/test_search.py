@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import json
@@ -8,7 +9,10 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+from openai import RateLimitError
 
 os.environ.setdefault("SERPAPI_KEY", "test-serpapi-not-a-real-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-not-a-real-key")
@@ -52,9 +56,11 @@ class SearchTests(unittest.TestCase):
             return SimpleNamespace(get_dict=lambda: recorded_google(params))
 
         self.start_patch(patch.object(backend, "GoogleSearch", side_effect=google))
-        self.start_patch(patch.object(backend.client.responses, "create",
-                                     return_value=SimpleNamespace(output_text="SI")))
-        self.start_patch(patch.object(backend, "RETRY_DELAY", 0))
+        self.ai_client = MagicMock()
+        self.ai_client.__aenter__.return_value = self.ai_client
+        self.ai_client.responses.create = AsyncMock(return_value=SimpleNamespace(output_text="SI"))
+        self.start_patch(patch.object(backend, "AsyncOpenAI", return_value=self.ai_client))
+        self.start_patch(patch.object(backend, "retry_delay", return_value=0))
         self.client = backend.app.test_client()
 
     def start_patch(self, mocker):
@@ -117,7 +123,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(updates[-1]["phase"], "csv")
         self.assertIsNone(updates[-1]["total"])
 
-    def test_sequential_ai_retries_failures_and_row_order(self):
+    def test_ai_retries_success_on_fourth_attempt_and_row_order(self):
         attempts = {}
         calls = []
 
@@ -129,25 +135,27 @@ class SearchTests(unittest.TestCase):
             calls.append(url.rsplit("/", 1)[-1])
             attempts[url] = attempts.get(url, 0) + 1
             attempt = attempts[url]
-            if url.endswith("/b") or (url.endswith("/c") and attempt == 1):
-                raise RuntimeError("429 rate limit: PRIVATE CASE AND KEY")
+            if (url.endswith("/b") and attempt < 4) or (url.endswith("/c") and attempt == 1):
+                raise RateLimitError("PRIVATE CASE AND KEY", response=httpx.Response(
+                    429, request=httpx.Request("POST", "https://api.openai.com/v1/responses")), body=None)
             return SimpleNamespace(output_text="NO" if url.endswith("custom") else "SI")
 
-        with patch.object(backend.client.responses, "create", side_effect=ai):
+        with patch.object(self.ai_client.responses, "create", side_effect=ai):
             updates = []
             result = backend.run_search(PAYLOAD, on_progress=updates.append)
         ai_updates = [e for e in updates if e["phase"] == "ai"]
-        self.assertEqual(calls, ["a", "custom", "b", "b", "b", "c", "c"])
+        self.assertEqual({url.rsplit("/", 1)[-1]: count for url, count in attempts.items()},
+                         {"a": 1, "custom": 1, "b": 4, "c": 2})
         self.assertEqual([e["completed"] for e in ai_updates], [0, 1, 2, 3, 4])
         self.assertTrue(all(e["total"] == 4 for e in ai_updates))
         self.assertEqual(ai_updates[-1]["stats"],
-                         {"succeeded": 3, "failed": 1, "retried": 3, "rate_limit_errors": 4})
-        self.assertEqual(result["ai_failures"], 1)
+                         {"succeeded": 4, "failed": 0, "retried": 4, "rate_limit_errors": 4})
+        self.assertEqual(result["ai_failures"], 0)
         rows = list(csv.DictReader(io.StringIO(self.read_csv(result))))
         self.assertEqual([r["URL"] for r in rows], ["https://example.test/" + p for p in ["a", "b", "c"]])
 
     def test_missing_description_skips_ai(self):
-        with patch.object(backend.client.responses, "create") as ai:
+        with patch.object(self.ai_client.responses, "create") as ai:
             events = self.stream({**PAYLOAD, "caseDescription": "   "})
         ai.assert_not_called()
         skipped = [e for e in events if e.get("skipped")]
@@ -155,6 +163,25 @@ class SearchTests(unittest.TestCase):
         self.assertIsNone(skipped[0]["total"])
         self.assertEqual(events[-1]["ai_skipped"], "no_description")
         self.assertEqual(events[-1]["results_count"], 4)
+
+    def test_exhausted_ai_retries_never_export_partial_csv_or_leak_errors(self):
+        previous = Path(self.directory.name, "previous.csv")
+        previous.write_text("previous result", encoding="utf-8")
+        error = RateLimitError("PRIVATE KEY AND CASE", response=httpx.Response(
+            429, request=httpx.Request("POST", "https://api.openai.com/v1/responses")), body=None)
+        with patch.object(self.ai_client.responses, "create", side_effect=error), \
+                patch.object(backend, "OPENAI_MAX_CONCURRENCY", 1):
+            events = self.stream()
+            self.assertEqual(events[-1]["type"], "error")
+            self.assertEqual(events[-1]["code"], "ai_filter_failed")
+            self.assertIn("Nessun nuovo CSV", events[-1]["message"])
+            self.assertNotIn("PRIVATE", json.dumps(events))
+            self.assertFalse(any(e.get("phase") == "csv" for e in events))
+            response = self.client.post("/api/search", json=PAYLOAD)
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.get_json()["code"], "ai_filter_failed")
+        self.assertEqual(list(Path(self.directory.name).glob("*.csv")), [previous])
+        self.assertEqual(previous.read_text(encoding="utf-8"), "previous result")
 
     def test_successful_empty_google_pages_keep_results_and_continue_queries(self):
         for state, message in [
@@ -214,7 +241,7 @@ class SearchTests(unittest.TestCase):
                 self.assertEqual(events[-1]["results_count"], 0)
                 self.assertEqual(events[-1]["ai_skipped"], "no_candidates")
                 self.assertEqual(self.read_csv(events[-1]), ",".join(backend.RESULT_COLUMNS) + "\n")
-        with patch.object(backend.client.responses, "create", return_value=SimpleNamespace(output_text="NO")):
+        with patch.object(self.ai_client.responses, "create", return_value=SimpleNamespace(output_text="NO")):
             result = backend.run_search(PAYLOAD)
             self.assertEqual(result["results_count"], 0)
             self.assertEqual(self.read_csv(result), ",".join(backend.RESULT_COLUMNS) + "\n")
@@ -361,19 +388,20 @@ class SearchTests(unittest.TestCase):
             for i in range(8)
         ])
 
-        def slow_ai(**kwargs):
+        async def slow_ai(**kwargs):
             entered.set()
-            release.wait(timeout=2)
+            while not release.is_set():
+                await asyncio.sleep(0.01)
             return SimpleNamespace(output_text="SI")
 
         def run():
             try:
-                backend.filter_with_openai(df, "Cliente", "Caso", stop_event=stopped,
-                                           report=lambda *args, **kwargs: completed.append(args))
+                asyncio.run(backend.filter_with_openai(df, "Cliente", "Caso", stop_event=stopped,
+                                           report=lambda *args, **kwargs: completed.append(args)))
             except backend.SearchCancelled:
                 errors.append("cancelled")
 
-        with patch.object(backend.client.responses, "create", side_effect=slow_ai) as ai:
+        with patch.object(self.ai_client.responses, "create", side_effect=slow_ai) as ai:
             thread = threading.Thread(target=run)
             thread.start()
             self.assertTrue(entered.wait(timeout=2))
@@ -381,7 +409,7 @@ class SearchTests(unittest.TestCase):
             release.set()
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
-            self.assertEqual(ai.call_count, 1)
+            self.assertLessEqual(ai.call_count, backend.OPENAI_MAX_CONCURRENCY)
             self.assertEqual(errors, ["cancelled"])
             self.assertEqual(completed, [])
 
@@ -391,9 +419,10 @@ class SearchTests(unittest.TestCase):
         finished = threading.Event()
         original_run = backend.run_search
 
-        def slow_ai(**kwargs):
+        async def slow_ai(**kwargs):
             entered.set()
-            release.wait(timeout=2)
+            while not release.is_set():
+                await asyncio.sleep(0.01)
             return SimpleNamespace(output_text="SI")
 
         def observe_run(*args, **kwargs):
@@ -403,7 +432,7 @@ class SearchTests(unittest.TestCase):
                 finished.set()
 
         with patch.object(backend, "HEARTBEAT_SECONDS", 0.02), patch.object(
-                backend.client.responses, "create", side_effect=slow_ai) as ai, patch.object(
+                self.ai_client.responses, "create", side_effect=slow_ai) as ai, patch.object(
                 backend, "run_search", side_effect=observe_run):
             response = self.client.post("/api/search-stream", json=PAYLOAD, buffered=False)
             try:
@@ -423,10 +452,10 @@ class SearchTests(unittest.TestCase):
                 response.close()
                 release.set()
             self.assertTrue(finished.wait(timeout=1))
-            self.assertEqual(ai.call_count, 1)
+            self.assertLessEqual(ai.call_count, backend.OPENAI_MAX_CONCURRENCY)
         self.assertEqual(list(Path(self.directory.name).glob("*.csv")), [])
 
-    def test_large_ai_workload_runs_in_order_on_calling_thread(self):
+    def test_large_ai_workload_keeps_order_on_calling_thread(self):
         df = backend.pd.DataFrame([
             {"Titolo": "Processo", "Snippet": "Caso", "URL": f"https://example.test/{i}"}
             for i in range(1000)
@@ -445,8 +474,8 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(total, 1000)
             completed.append(count)
 
-        with patch.object(backend.client.responses, "create", side_effect=ai):
-            output = backend.filter_with_openai(df, "Cliente", "Caso", report=report, tracker=tracker)
+        with patch.object(self.ai_client.responses, "create", side_effect=ai):
+            output = asyncio.run(backend.filter_with_openai(df, "Cliente", "Caso", report=report, tracker=tracker))
         self.assertEqual(urls, list(df["URL"]))
         self.assertEqual(tracker.get_stats(),
                          {"succeeded": 1000, "failed": 0, "retried": 0, "rate_limit_errors": 0})

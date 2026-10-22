@@ -5,9 +5,13 @@ Use fixedPart LONG_WAIT for a controlled 15-minute wait, EMPTY for no results,
 or ERROR for a provider failure. Never use this module as the production app.
 """
 
+import asyncio
+from contextlib import asynccontextmanager
 import os
 import time
 from types import SimpleNamespace
+import httpx
+from openai import APIConnectionError
 
 from tests.test_search import backend, recorded_google
 
@@ -23,21 +27,28 @@ class PreviewGoogle:
         time.sleep(0.2)
         if "EMPTY" in query:
             return {}
-        if "ERROR" in query:
+        if query.startswith('"ERROR"'):
             return {"error": "Synthetic provider failure"}
         return recorded_google(self.params)
 
 
-def preview_ai(**kwargs):
+async def preview_ai(**kwargs):
     url = kwargs["input"].split("  - URL: ")[1].splitlines()[0]
-    time.sleep({"a": 1, "custom": 2, "b": 3, "c": 4}[url.rsplit("/", 1)[-1]])
-    if url.endswith("/b"):
-        raise RuntimeError("Synthetic AI failure")
+    await asyncio.sleep({"a": 1, "custom": 2, "b": 3, "c": 4}[url.rsplit("/", 1)[-1]])
+    if url.endswith("/b") and '**SOGGETTO:** "AI_ERROR"' in kwargs["input"]:
+        raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
     return SimpleNamespace(output_text="NO" if url.endswith("custom") else "SI")
 
 
 backend.GoogleSearch = PreviewGoogle
-backend.client.responses.create = preview_ai
+
+
+@asynccontextmanager
+async def preview_client(**kwargs):
+    yield SimpleNamespace(responses=SimpleNamespace(create=preview_ai))
+
+
+backend.AsyncOpenAI = preview_client
 app = backend.app
 
 

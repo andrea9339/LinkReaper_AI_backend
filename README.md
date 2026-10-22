@@ -61,23 +61,34 @@ pages, so other queries and collected results are preserved. Failed provider
 responses still stop the search. Logs record the query index, page, and a
 validated archive search ID when available, without logging query text or keys.
 
-AI filtering evaluates one link at a time, in input order. It uses `gpt-6-luna`
-with reasoning effort `high` and the `web_search` tool, matching the reference
-script's model settings. Retries finish before the next link starts. A link is
-retained if its AI assessment fails after all retries; the completion event
-reports how many links could not be verified.
+AI filtering uses one `AsyncOpenAI` client per search and up to five concurrent
+link assessments. `OPENAI_MAX_CONCURRENCY` controls this limit, including rows
+waiting between retries. Set it to `1` for a sequential comparison. Model
+`gpt-6-luna`, reasoning effort `high`, `web_search`, prompt, and answer parsing
+remain unchanged. Decisions are applied by row position, preserving CSV order.
+
+`OPENAI_MAX_RETRIES = 3` permits four API attempts per row. SDK retries are
+disabled. API errors use asynchronous exponential backoff with jitter and honor
+`Retry-After`, including waits longer than 60 seconds. Local programming errors
+and cancellation are not retried. Exhausted attempts stop the search with code
+`ai_filter_failed`, cancel pending tasks, and close the client. No new CSV is
+written. Previously downloaded files remain valid.
 
 The progress bar measures the current phase: Google search, AI analysis, or CSV
 preparation. CSV preparation is indeterminate. `complete` is emitted after the
-CSV file has closed. It includes the existing result fields, elapsed seconds,
-the number of links retained after final AI failures, and any AI skip reason.
+CSV file has closed. It includes the existing result fields, total elapsed
+seconds, separate `ai_elapsed_seconds`, and any AI skip reason. Successful searches
+report `ai_failures: 0`. AI timing, throughput, evaluated/kept/excluded counts,
+concurrency, and retry statistics are also logged without case data or keys.
 The legacy JSON endpoint and CSV download keep their existing response format.
 
 Each request owns its queue, counters, and cancellation event. The queue keeps
 at most 32 pending updates; slow readers cannot block the search. Heartbeat
 comments are sent every 12 seconds while external calls are pending. Closing
-the connection stops work at safe boundaries and prevents subsequent AI calls from
-starting; external calls already running can still finish. There is no refresh
+the connection stops Google work at safe boundaries. During AI filtering, a
+monitor checks the stop event every 100 ms, cancels local HTTP requests and retry
+waits, then drains tasks before closing the client. Already submitted requests
+may continue at the provider. There is no refresh
 recovery or automatic resubmission.
 
 ### Render configuration
@@ -85,8 +96,10 @@ recovery or automatic resubmission.
 The repository's `gunicorn.conf.py` is loaded automatically by Gunicorn when
 started from the repository root. It uses one `gthread` worker and four request
 threads, sized for one active client plus downloads and health checks. Each
-search evaluates its AI links sequentially. Gunicorn 23's main threaded loop reports worker
-liveness independently of a long-running request.
+search owns an asyncio event loop inside its synchronous worker and evaluates
+up to five AI links concurrently. The limit belongs to each search, rather than
+the entire service. Gunicorn 23's main threaded loop reports worker liveness
+independently of a long-running request.
 
 The existing Render start command can stay:
 
@@ -107,7 +120,7 @@ python -m unittest discover -s tests -v
 ```
 
 Tests use synthetic Google and AI responses, covering CSV parity, counts,
-sequential AI calls, retries and fallback, empty results, input errors,
+concurrent AI calls, retry budgets, fail-fast errors, empty results, input errors,
 heartbeats during Google and AI calls, disconnected readers, bounded queues,
 and independent progress for overlapping requests.
 They do not consume API quota.
@@ -116,5 +129,24 @@ For an isolated test service only, run
 `gunicorn tests.preview_app:app --bind 0.0.0.0:$PORT`. This module replaces both
 external clients with synthetic responses. `fixedPart: "LONG_WAIT"` waits 905
 seconds before the first Google page completes; `EMPTY` returns no results and
-`ERROR` simulates a provider error. Never use this module for production.
+`ERROR` simulates a provider error. `AI_ERROR` exhausts the AI retry budget.
+Never use this module for production.
 
+
+### Paid performance comparison
+
+`tests/fixtures/ai_benchmark_enron.json` contains 100 distinct public Google
+results about Enron, collected once for the performance check. The benchmark
+reuses the same sample for concurrency one and five and does not call SerpAPI.
+It requires the usual API environment variables and consumes OpenAI quota:
+
+```sh
+python -m tests.benchmark_ai --sample tests/fixtures/ai_benchmark_enron.json
+```
+
+On a Windows machine requiring the OS certificate store, append
+`--system-certificates`. TLS verification remains enabled. The report records
+sample hash, duration, throughput, retries, classification differences, and
+measured speedup in `tests/async-benchmark.json`. Model outputs can vary between
+runs. A result on this public sample does not establish classification quality
+or latency for customer cases.
