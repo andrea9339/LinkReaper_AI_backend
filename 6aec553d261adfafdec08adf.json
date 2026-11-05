@@ -1,0 +1,24 @@
+{
+  "search_metadata": {
+    "id": "6aec553d261adfafdec08adf",
+    "status": "Error",
+    "json_endpoint": "https://serpapi.com/searches/RW05HxjHJ_yK8Kem-eY573scy68EPloa5JbooB7HZLY/6aec553d261adfafdec08adf.json",
+    "markdown_endpoint": "https://serpapi.com/searches/RW05HxjHJ_yK8Kem-eY573scy68EPloa5JbooB7HZLY/6aec553d261adfafdec08adf.md",
+    "created_at": "2026-11-05 10:06:53 UTC",
+    "processed_at": "2026-11-05 10:06:53 UTC",
+    "google_light_url": "https://www.google.com/search?q=%22Gabriele+gallassi%22+tutela&oq=%22Gabriele+gallassi%22+tutela&hl=it&gl=it&start=80&sourceid=chrome&ie=UTF-8&gbv=1",
+    "total_time_taken": 90.03
+  },
+  "search_parameters": {
+    "engine": "google_light",
+    "q": "\"Gabriele gallassi\" tutela",
+    "location_requested": "Italy",
+    "location_used": "Italy",
+    "google_domain": "google.com",
+    "hl": "it",
+    "gl": "it",
+    "start": 80,
+    "device": "desktop"
+  },
+  "error": "We couldn't get valid results for this search. Please try again later."
+}
