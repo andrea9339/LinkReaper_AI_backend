@@ -289,7 +289,7 @@ def run_search(data, on_progress=None, stop_event=None):
     report("google", "Ricerca Google in corso", 0, total_pages,
            query_index=1, query_total=len(queries), page=1)
 
-    # Loop through each query and perform a search across the first 10 pages
+    # Search up to 10 pages per query, stopping at the first empty page.
     for query_index, query in enumerate(queries, start=1):
         data_rows = []
 
@@ -335,8 +335,12 @@ def run_search(data, on_progress=None, stop_event=None):
                     "Data": result.get("date")
                 })
             completed_pages += 1
+            if not organic_results:
+                total_pages -= 9 - page  # Remove pages this query will not request.
             report("google", "Ricerca Google in corso", completed_pages, total_pages,
                    query_index=query_index, query_total=len(queries), page=page + 1)
+            if not organic_results:
+                break
 
         # Create and sort dataframe
         query_df = pd.DataFrame(data_rows, columns=RESULT_COLUMNS)

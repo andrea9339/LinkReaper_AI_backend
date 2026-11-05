@@ -111,17 +111,67 @@ class SearchTests(unittest.TestCase):
 
         backend.run_search({**PAYLOAD, "keywords": " truffa,, "}, on_progress=observe)
         google = [e for e in updates if e["phase"] == "google"]
-        self.assertEqual([e["completed"] for e in google], list(range(41)))
-        self.assertTrue(all(e["total"] == 40 for e in google))
+        self.assertEqual([e["completed"] for e in google], list(range(9)))
+        self.assertEqual([e["total"] for e in google], [40, 40, 32, 32, 24, 24, 16, 16, 8])
         self.assertEqual(google[-1]["query_index"], 4)
-        self.assertEqual(google[-1]["page"], 10)
+        self.assertEqual(google[-1]["page"], 2)
         self.assertEqual(self.google_calls[0]["engine"], "google_light")
-        self.assertEqual([p["start"] for p in self.google_calls[:10]], list(range(0, 100, 10)))
-        self.assertEqual([p["q"] for p in self.google_calls[::10]],
+        self.assertEqual([p["start"] for p in self.google_calls], [0, 10] * 4)
+        self.assertEqual([p["q"] for p in self.google_calls[::2]],
                          ['"Soggetto È"', '"Soggetto È" truffa', '"Soggetto È" ', '"Soggetto È" '])
         self.assertNotIn("cleanup", {e["phase"] for e in updates})
         self.assertEqual(updates[-1]["phase"], "csv")
         self.assertIsNone(updates[-1]["total"])
+
+    def test_first_empty_page_stops_only_current_query_and_keeps_previous_pages(self):
+        for empty_start in (0, 30, 90):
+            for empty_fields in ({}, {"organic_results": []}, {"organic_results": None}):
+                with self.subTest(empty_start=empty_start, empty_fields=empty_fields):
+                    self.google_calls.clear()
+
+                    def google(params):
+                        self.google_calls.append(params.copy())
+                        is_keyword_query = params["q"].endswith("truffa")
+                        stop_at = 10 if is_keyword_query else empty_start
+                        if params["start"] == stop_at:
+                            result = {"search_metadata": {"status": "Success"}, **empty_fields}
+                        else:
+                            suffix = "keyword" if is_keyword_query else str(params["start"])
+                            result = {"organic_results": [
+                                {"title": "Processo", "link": f"https://example.test/{suffix}"}]}
+                        return SimpleNamespace(get_dict=lambda: result)
+
+                    with patch.object(backend, "GoogleSearch", side_effect=google):
+                        events = self.stream({**PAYLOAD, "caseDescription": ""})
+
+                    expected_starts = list(range(0, empty_start + 1, 10)) + [0, 10]
+                    self.assertEqual([p["start"] for p in self.google_calls], expected_starts)
+                    self.assertEqual(events[-1]["type"], "complete")
+                    rows = list(csv.DictReader(io.StringIO(self.read_csv(events[-1]))))
+                    self.assertEqual([r["URL"] for r in rows],
+                                     [f"https://example.test/{start}" for start in range(0, empty_start, 10)]
+                                     + ["https://example.test/keyword"])
+                    self.assertEqual([r["Posizione"] for r in rows],
+                                     [str(start + 1) for start in range(0, empty_start, 10)] + ["1"])
+                    google_updates = [e for e in events if e.get("phase") == "google"]
+                    self.assertEqual([e["completed"] for e in google_updates],
+                                     list(range(len(expected_starts) + 1)))
+                    self.assertEqual(google_updates[-1]["total"], len(expected_starts))
+                    self.assertTrue(all(e["completed"] <= e["total"] for e in google_updates))
+
+    def test_nonempty_pages_keep_ten_page_cap_despite_partial_pages_and_duplicates(self):
+        with patch.object(backend, "GoogleSearch", return_value=SimpleNamespace(get_dict=lambda: {
+                "organic_results": [{"title": "Processo", "link": "https://example.test/repeated"}]
+        })) as google:
+            events = self.stream({**PAYLOAD, "caseDescription": ""})
+        self.assertEqual(google.call_count, 20)
+        self.assertEqual([call.args[0]["start"] for call in google.call_args_list],
+                         list(range(0, 100, 10)) * 2)
+        self.assertEqual(events[-1]["type"], "complete")
+        self.assertEqual(events[-1]["results_count"], 1)
+        google_updates = [e for e in events if e.get("phase") == "google"]
+        self.assertEqual(google_updates[-1]["completed"], 20)
+        self.assertTrue(all(e["total"] == 20 for e in google_updates))
 
     def test_ai_retries_success_on_fourth_attempt_and_row_order(self):
         attempts = {}
@@ -211,8 +261,10 @@ class SearchTests(unittest.TestCase):
                 self.assertEqual([r["URL"] for r in rows], ["https://example.test/" + p
                                                           for p in ["a", "custom", "b", "c"]])
                 google_updates = [e for e in events if e.get("phase") == "google"]
-                self.assertEqual([e["completed"] for e in google_updates], list(range(21)))
-                self.assertEqual(len(self.google_calls), 40)
+                self.assertEqual([e["completed"] for e in google_updates], list(range(5)))
+                self.assertEqual([e["total"] for e in google_updates], [20, 20, 12, 12, 4])
+                self.assertEqual(len(self.google_calls), 8)
+                self.assertEqual([p["start"] for p in self.google_calls], [0, 10] * 4)
 
     def test_failed_google_status_stops_search_without_leaking_provider_data(self):
         for provider_result in [
@@ -364,7 +416,8 @@ class SearchTests(unittest.TestCase):
         for subject, events in results.items():
             self.assertEqual(events[-1]["type"], "complete")
             google = [e for e in events if e.get("phase") == "google"]
-            self.assertEqual([e["completed"] for e in google], list(range(21)))
+            self.assertEqual([e["completed"] for e in google], list(range(5)))
+            self.assertEqual(google[-1]["total"], 4)
             ai = [e for e in events if e.get("phase") == "ai"]
             self.assertEqual(ai[-1]["stats"]["succeeded"], 4)
             self.assertIn(subject, self.read_csv(events[-1]))

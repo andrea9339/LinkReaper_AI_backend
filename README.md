@@ -56,10 +56,13 @@ filtering still run, without a separate progress phase.
 
 SerpAPI can return a successful Google page with no results and an `error`
 message explaining that nothing was found. Pages with
-`search_metadata.status: "Success"` are handled normally, including empty
-pages, so other queries and collected results are preserved. Failed provider
-responses still stop the search. Logs record the query index, page, and a
-validated archive search ID when available, without logging query text or keys.
+`search_metadata.status: "Success"` are handled normally. Each query searches
+up to 10 pages and stops at the first page with no organic results, preserving
+results from earlier pages and continuing with the next query at page 1. Pages
+with 1–9 results still continue. Google progress counts include the empty page
+request, and the total decreases to exclude skipped pages. Failed provider
+responses still stop the entire search. Logs record the query index, page, and
+a validated archive search ID when available, without logging query text or keys.
 
 AI filtering uses one `AsyncOpenAI` client per search and up to five concurrent
 link assessments. `OPENAI_MAX_CONCURRENCY` controls this limit, including rows
