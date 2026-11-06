@@ -1,5 +1,15 @@
 # This is the **backend** developement for the new linkreaper with AI filtering
 
+## Main Updates
+- used ai filtering to have more accurate results
+- asyncronous call from open AI api to improve speed and latency
+- stop the google search at the first page with no result to avoid errors and improve speed
+
+## Future Updates
+- Implementing researches with no "" to get more results
+- implementing *decision model* (laya) to improve speed and reduce token cost with API
+
+  
 ## Enviroment variables
 The APIs used are protected with  ***environment variables***
 I create an enviromental variable  to secure serpapi and openai on the web
