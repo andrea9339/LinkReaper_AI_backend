@@ -49,6 +49,8 @@ class SearchTests(unittest.TestCase):
         self.start_patch(patch.object(backend.tempfile, "NamedTemporaryFile",
                                      side_effect=lambda **kw: original_tempfile(dir=self.directory.name, **kw)))
         self.start_patch(patch.object(backend.tempfile, "gettempdir", return_value=self.directory.name))
+        self.start_patch(patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}))
+        self.start_patch(patch.object(backend, "classify_jev", AsyncMock(return_value="VERIFICA")))
         self.google_calls = []
 
         def google(params):
@@ -90,7 +92,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(sum(e["type"] in ("complete", "error") for e in events), 1)
         self.assertEqual(self.read_csv(legacy), self.read_csv(complete))
         rows = list(csv.DictReader(io.StringIO(self.read_csv(complete))))
-        self.assertEqual(list(rows[0]), backend.RESULT_COLUMNS)
+        self.assertEqual(list(rows[0]), (backend.RESULT_COLUMNS + ["controlla?"]))
         self.assertEqual([row["URL"] for row in rows], ["https://example.test/" + p
                                                        for p in ["a", "custom", "b", "c"]])
         self.assertEqual(rows[0]["Dominio"], "example.test")
@@ -178,9 +180,9 @@ class SearchTests(unittest.TestCase):
         calls = []
 
         def ai(**kwargs):
-            url = kwargs["input"].split("  - URL: ")[1].splitlines()[0]
-            self.assertEqual(kwargs["model"], "gpt-6-luna")
-            self.assertEqual(kwargs["reasoning"], {"effort": "high"})
+            url = json.loads(kwargs["input"])["url"]
+            self.assertEqual(kwargs["model"], "gpt-6.2-sol")
+            self.assertEqual(kwargs["reasoning"], {"effort": "medium"})
             self.assertEqual(kwargs["tools"], [{"type": "web_search"}])
             calls.append(url.rsplit("/", 1)[-1])
             attempts[url] = attempts.get(url, 0) + 1
@@ -292,11 +294,11 @@ class SearchTests(unittest.TestCase):
                 events = self.stream()
                 self.assertEqual(events[-1]["results_count"], 0)
                 self.assertEqual(events[-1]["ai_skipped"], "no_candidates")
-                self.assertEqual(self.read_csv(events[-1]), ",".join(backend.RESULT_COLUMNS) + "\n")
+                self.assertEqual(self.read_csv(events[-1]), ",".join((backend.RESULT_COLUMNS + ["controlla?"])) + "\n")
         with patch.object(self.ai_client.responses, "create", return_value=SimpleNamespace(output_text="NO")):
             result = backend.run_search(PAYLOAD)
             self.assertEqual(result["results_count"], 0)
-            self.assertEqual(self.read_csv(result), ",".join(backend.RESULT_COLUMNS) + "\n")
+            self.assertEqual(self.read_csv(result), ",".join((backend.RESULT_COLUMNS + ["controlla?"])) + "\n")
 
     def test_invalid_payloads_rejected_before_work(self):
         for path in ["/api/search", "/api/search-stream"]:
@@ -520,7 +522,7 @@ class SearchTests(unittest.TestCase):
 
         def ai(**kwargs):
             self.assertEqual(threading.get_ident(), caller_thread)
-            urls.append(kwargs["input"].split("  - URL: ")[1].splitlines()[0])
+            urls.append(json.loads(kwargs["input"])["url"])
             return SimpleNamespace(output_text="SI")
 
         def report(phase, message, count, total, **details):

@@ -1,16 +1,9 @@
 # This is the **backend** developement for the new linkreaper with AI filtering
 
-## Enviroment variables
-The APIs used are protected with  ***environment variables***
-I create an enviromental variable  to secure serpapi and openai on the web
-```
-api_key = os.getenv('SERPAPI_KEY')
-openai_api_key = os.getenv('OPENAI_API_KEY')
-```
+## Environment variables
 
-And put the key-value on the Render environment variables.
-
-Then I deployed my flask app on a cloud hosting platform (render)
+Set `SERPAPI_KEY`, `TYPESAFE_API_KEY` and `OPENAI_API_KEY` in the Render service environment.
+SerpAPI runs the search, Jev classifies the keyword matches, and OpenAI handles cases Jev leaves open.
 
 ## Requirements issues
 
@@ -64,18 +57,17 @@ request, and the total decreases to exclude skipped pages. Failed provider
 responses still stop the entire search. Logs record the query index, page, and
 a validated archive search ID when available, without logging query text or keys.
 
-AI filtering uses one `AsyncOpenAI` client per search and up to five concurrent
-link assessments. `OPENAI_MAX_CONCURRENCY` controls this limit, including rows
-waiting between retries. Set it to `1` for a sequential comparison. Model
-`gpt-6-luna`, reasoning effort `high`, `web_search`, prompt, and answer parsing
-remain unchanged. Decisions are applied by row position, preserving CSV order.
+Jev evaluates each keyword match using the subject, case description, title and snippet.
+A probability of at least 0.8 for the selected `pertinente` or `estraneo` option settles the result.
+Ambiguous or lower-probability results go to `gpt-6.2-sol` with medium reasoning effort.
+Sol can open the supplied URL through web search. When the page is inaccessible or the evidence
+remains inconclusive, the CSV keeps the row with `SÌ` in `controlla?`. Confirmed matches and
+rows exported without AI have an empty cell. Negative results are excluded. Row order is preserved.
 
-`OPENAI_MAX_RETRIES = 3` permits four API attempts per row. SDK retries are
-disabled. API errors use asynchronous exponential backoff with jitter and honor
-`Retry-After`, including waits longer than 60 seconds. Local programming errors
-and cancellation are not retried. Exhausted attempts stop the search with code
-`ai_filter_failed`, cancel pending tasks, and close the client. No new CSV is
-written. Previously downloaded files remain valid.
+`OPENAI_MAX_CONCURRENCY` limits the number of active rows to five, including rows waiting for retries.
+`OPENAI_MAX_RETRIES = 3` permits four attempts per provider per row. Transient errors use
+asynchronous exponential backoff with jitter and honor `Retry-After`. Permanent provider errors
+and exhausted retries stop the job with `ai_filter_failed`. Earlier exports remain available.
 
 The progress bar measures the current phase: Google search, AI analysis, or CSV
 preparation. CSV preparation is indeterminate. `complete` is emitted after the

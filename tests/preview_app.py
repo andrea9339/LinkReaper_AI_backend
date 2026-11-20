@@ -6,6 +6,7 @@ or ERROR for a provider failure. Never use this module as the production app.
 """
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 import os
 import time
@@ -33,13 +34,19 @@ class PreviewGoogle:
 
 
 async def preview_ai(**kwargs):
-    url = kwargs["input"].split("  - URL: ")[1].splitlines()[0]
+    url = json.loads(kwargs["input"])["url"]
     await asyncio.sleep({"a": 1, "custom": 2, "b": 3, "c": 4}[url.rsplit("/", 1)[-1]])
-    if url.endswith("/b") and '**SOGGETTO:** "AI_ERROR"' in kwargs["input"]:
+    if url.endswith("/b") and json.loads(kwargs["input"])["soggetto"] == "AI_ERROR":
         raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
     return SimpleNamespace(output_text="NO" if url.endswith("custom") else "SI")
 
 
+async def preview_jev(http, key, state):
+    return "VERIFICA"
+
+
+os.environ.setdefault("TYPESAFE_API_KEY", "preview")
+backend.classify_jev = preview_jev
 backend.GoogleSearch = PreviewGoogle
 
 

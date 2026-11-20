@@ -9,7 +9,7 @@ import os
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from openai import AsyncOpenAI, RateLimitError
@@ -22,7 +22,7 @@ import linkreaper_AI as backend
 def answer(text):
     return httpx.Response(200, json={
         "id": "resp_test", "object": "response", "created_at": 0,
-        "model": "gpt-6-luna", "status": "completed",
+        "model": "gpt-6.2-sol", "status": "completed",
         "output": [{"type": "message", "id": "msg_test", "role": "assistant",
                     "status": "completed", "content": [
                         {"type": "output_text", "text": text, "annotations": []}]}],
@@ -35,6 +35,7 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
             {"Titolo": f"Processo {i}", "Snippet": "Caso", "URL": f"https://example.test/{i}"}
             for i in range(12)
         ], index=[2, 2, 7, 11, 14, 20, 21, 25, 30, 31, 40, 100])
+        self.enterContext(patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}))
         self.sessions = []
 
     @contextmanager
@@ -46,8 +47,48 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
             self.sessions.append(session)
             return session
 
-        with patch.object(backend, "AsyncOpenAI", side_effect=factory):
+        with patch.object(backend, "classify_jev", AsyncMock(return_value="VERIFICA")), patch.object(backend, "AsyncOpenAI", side_effect=factory):
             yield
+
+    async def test_jev_routes_and_manual_review(self):
+        choices = [("pertinente", .8), ("estraneo", .8), ("ambiguo", .99),
+                   ("estraneo", .79), ("pertinente", .79)]
+
+        def jev(request):
+            body = json.loads(request.content)
+            self.assertEqual(request.headers["Authorization"], "Bearer test")
+            self.assertEqual(set(body["state"]), {"soggetto", "caso", "titolo", "snippet"})
+            i = int(body["state"]["titolo"].split()[-1])
+            choice, probability = choices[i]
+            return httpx.Response(200, json={"answers": {"pertinenza": {
+                "type": "choice", "choice": choice, "probabilities": {choice: probability}}}})
+
+        def sol(request):
+            url = json.loads(json.loads(request.content)["input"])["url"]
+            return answer({"/2": "MANUALE", "/3": "NO", "/4": "SI"}[url[-2:]])
+
+        jev_http = httpx.AsyncClient(transport=httpx.MockTransport(jev))
+        sol_http = httpx.AsyncClient(transport=httpx.MockTransport(sol))
+        with patch.object(backend.httpx, "AsyncClient", return_value=jev_http), patch.object(
+                backend, "AsyncOpenAI", return_value=AsyncOpenAI(api_key="test", http_client=sol_http)):
+            result = await backend.filter_with_openai(self.df.iloc[:5], "Cliente", "Caso")
+        self.assertEqual(result["Titolo"].tolist(), ["Processo 0", "Processo 2", "Processo 4"])
+        self.assertEqual(result["controlla?"].tolist(), ["", "SÌ", ""])
+
+    async def test_jev_error_stops_before_sol(self):
+        for response in (httpx.Response(401), httpx.Response(200, json={"answers": {}})):
+            calls = []
+
+            def handler(request):
+                calls.append(request)
+                return response
+
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            with patch.object(backend.httpx, "AsyncClient", return_value=client), patch.object(
+                    backend, "AsyncOpenAI") as sol, self.assertRaises(backend.OpenAIFilterError):
+                await backend.filter_with_openai(self.df, "Cliente", "Caso")
+            self.assertEqual(len(calls), 1)
+            sol.assert_not_called()
 
     async def test_concurrent_out_of_order_answers_match_sequential_csv(self):
         active = 0
@@ -58,20 +99,20 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
         async def handler(request):
             nonlocal active, peak
             body = json.loads(request.content)
-            self.assertEqual(set(body), {"model", "reasoning", "tools", "input"})
-            self.assertEqual(body["model"], "gpt-6-luna")
-            self.assertEqual(body["reasoning"], {"effort": "high"})
+            self.assertEqual(set(body), {"model", "reasoning", "tools", "input", "instructions"})
+            self.assertEqual(body["model"], "gpt-6.2-sol")
+            self.assertEqual(body["reasoning"], {"effort": "medium"})
             self.assertEqual(body["tools"], [{"type": "web_search"}])
-            self.assertIn('- **SOGGETTO:** "Cliente È"', body["input"])
-            self.assertIn('- **CASO:** "Caso specifico"', body["input"])
-            position = int(body["input"].split("  - URL: https://example.test/")[1].splitlines()[0])
+            self.assertEqual(json.loads(body["input"])["soggetto"], "Cliente È")
+            self.assertEqual(json.loads(body["input"])["caso"], "Caso specifico")
+            position = int(json.loads(body["input"])["url"].rsplit("/", 1)[1])
             calls.append(position)
             active += 1
             peak = max(peak, active)
             try:
                 await asyncio.sleep(0.004 * (5 - position % 5))
                 finished.append(position)
-                return answer(" si, pertinente " if position % 2 == 0 else "NO")
+                return answer(" si " if position % 2 == 0 else "NO")
             finally:
                 active -= 1
 
@@ -98,14 +139,18 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_api_failure_cancels_pending_requests_before_client_closes(self):
         attempts = Counter()
+        all_started = asyncio.Event()
         cancelled = []
         tracker = backend.ProgressTracker()
         counts = []
 
         async def handler(request):
-            url = json.loads(request.content)["input"].split("  - URL: ")[1].splitlines()[0]
+            url = json.loads(json.loads(request.content)["input"])["url"]
             attempts[url] += 1
+            if len(attempts) == 5:
+                all_started.set()
             if url.endswith("/0"):
+                await asyncio.wait_for(all_started.wait(), timeout=5)
                 return httpx.Response(429, json={"error": {"message": "PRIVATE KEY AND CASE"}})
             try:
                 await asyncio.sleep(30)
@@ -156,7 +201,7 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("2", calls)
 
         async def handler(request):
-            position = json.loads(request.content)["input"].split("https://example.test/")[1].splitlines()[0]
+            position = json.loads(json.loads(request.content)["input"])["url"].rsplit("/", 1)[1]
             calls[position] += 1
             if position == "0" and calls[position] == 1:
                 return httpx.Response(429, headers={"Retry-After": "120"}, json={"error": {"message": "wait"}})
@@ -227,7 +272,7 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(backend, "AsyncOpenAI") as client:
             output = await backend.filter_with_openai(self.df.iloc[:0], "Cliente", "Caso")
             self.assertTrue(output.empty)
-            self.assertEqual(output.columns.tolist(), self.df.columns.tolist())
+            self.assertEqual(output.columns.tolist(), self.df.columns.tolist() + ["controlla?"])
             for name, values in [("OPENAI_MAX_CONCURRENCY", [0, -1, 1.5, True]),
                                  ("OPENAI_MAX_RETRIES", [-1, 1.5, True])]:
                 for value in values:

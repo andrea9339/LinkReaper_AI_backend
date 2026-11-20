@@ -1,6 +1,6 @@
 """Paid, opt-in comparison on a fixed JSON sample, without repeating Google searches.
 
-Set OPENAI_API_KEY and SERPAPI_KEY, then run from the backend directory:
+Set TYPESAFE_API_KEY, OPENAI_API_KEY and SERPAPI_KEY, then run from the backend directory:
 python -m tests.benchmark_ai --sample tests/fixtures/ai_benchmark_enron.json
 """
 
@@ -47,7 +47,7 @@ async def benchmark(sample, subject, case, system_certificates=False):
                      "links_per_minute": round(len(frame) * 60 / elapsed, 2), **tracker.get_stats()})
 
     return {"sample": str(sample), "sample_sha256": hashlib.sha256(raw).hexdigest(),
-            "subject": subject, "case": case, "model": "gpt-6-luna", "reasoning": {"effort": "high"},
+            "subject": subject, "case": case, "first_model": "jev-latest", "model": "gpt-6.2-sol", "reasoning": {"effort": "medium"},
             "tools": [{"type": "web_search"}], "max_retries": backend.OPENAI_MAX_RETRIES,
             "system_certificates": system_certificates, "runs": runs,
             "speedup": round(runs[0]["seconds"] / runs[1]["seconds"], 2),
