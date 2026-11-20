@@ -1,9 +1,45 @@
 # This is the **backend** developement for the new linkreaper with AI filtering
 
 ## Main Updates
-- used ai filtering to have more accurate results
-- asyncronous call from open AI api to improve speed and latency
-- stop the google search at the first page with no result to avoid errors and improve speed
+
+- **Google search** stops each query at the first page without organic results. The backend removes duplicate URLs and prefilters results by keywords in the title or snippet.
+- **Jev** classifies the remaining links. A relevant or unrelated decision stands when its probability is at least 0.8. Ambiguous and lower-confidence results go to **GPT-6.2 Sol**.
+- **GPT-6.2 Sol** uses medium reasoning effort and can open the result URL through web search when it needs more evidence. Links it cannot resolve stay in the CSV with `SÌ` in `controlla?`. Relevant links have an empty cell, and unrelated links are excluded.
+- **Live progress** shows Google search, AI analysis, and CSV preparation. Each search evaluates up to five links concurrently.
+
+## LinkReaper workflow
+
+```mermaid
+flowchart TD
+    A["Subject and search terms<br/>Optional case keywords and description"]
+    B["Search Google via SerpAPI"]
+    C["Deduplicate URLs and prefilter titles and snippets by keyword"]
+    D{"Case description and candidate links?"}
+    E["Jev assesses subject identity and relevance for each link"]
+    F{"Jev result"}
+    G["GPT-6.2 Sol · medium<br/>Opens the result URL through web search if needed"]
+    H{"Sol result"}
+    I["Keep link<br/>Leave controlla? blank"]
+    J["Exclude link"]
+    K["Keep link for manual review<br/>Set controlla? to SÌ"]
+    L["Export CSV in original order"]
+    M["Export keyword matches or an empty CSV<br/>Include the controlla? column"]
+
+    A --> B --> C --> D
+    D -->|Yes| E --> F
+    D -->|No| M
+    F -->|Relevant ≥ 0.8| I
+    F -->|Unrelated ≥ 0.8| J
+    F -->|Ambiguous or below 0.8| G --> H
+    H -->|Relevant| I
+    H -->|Unrelated| J
+    H -->|Inconclusive or page unavailable| K
+    I --> L
+    J --> L
+    K --> L
+```
+
+If a provider fails permanently or runs out of retries, the search ends with an error before exporting a new CSV.
 
 ## Future Updates
 - Implementing researches with no "" to get more results
