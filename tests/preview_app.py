@@ -38,7 +38,7 @@ async def preview_ai(**kwargs):
     await asyncio.sleep({"a": 1, "custom": 2, "b": 3, "c": 4}[url.rsplit("/", 1)[-1]])
     if url.endswith("/b") and json.loads(kwargs["input"])["soggetto"] == "AI_ERROR":
         raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
-    return SimpleNamespace(output_text="NO" if url.endswith("custom") else "SI")
+    return SimpleNamespace(status="completed", output_text="NO" if url.endswith("custom") else "SI")
 
 
 async def preview_jev(http, key, state):

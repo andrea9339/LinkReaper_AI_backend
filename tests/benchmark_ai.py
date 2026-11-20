@@ -29,6 +29,11 @@ async def benchmark(sample, subject, case, system_certificates=False):
             kwargs["http_client"] = httpx.AsyncClient(verify=ssl.create_default_context())
         return AsyncOpenAI(**kwargs)
 
+    def jev_http(**kwargs):
+        if system_certificates:
+            kwargs["verify"] = ssl.create_default_context()
+        return httpx.AsyncClient(**kwargs)
+
     for concurrency in [1, 5]:
         tracker = backend.ProgressTracker()
         started = time.perf_counter()
@@ -37,11 +42,11 @@ async def benchmark(sample, subject, case, system_certificates=False):
             if completed % 10 == 0 or completed == total:
                 print(f"concurrency={concurrency}: {completed}/{total}", flush=True)
 
-        with patch.object(backend, "OPENAI_MAX_CONCURRENCY", concurrency), \
+        with patch.object(backend, "AsyncClient", side_effect=jev_http), patch.object(backend, "OPENAI_MAX_CONCURRENCY", concurrency), \
                 patch.object(backend, "AsyncOpenAI", side_effect=factory):
             output = await backend.filter_with_openai(frame, subject, case, tracker=tracker, report=report)
         elapsed = time.perf_counter() - started
-        outputs.append(set(output["URL"]))
+        outputs.append(dict(zip(output["URL"], output["controlla?"])))
         runs.append({"concurrency": concurrency, "evaluated": len(frame), "kept": len(output),
                      "excluded": len(frame) - len(output), "seconds": round(elapsed, 2),
                      "links_per_minute": round(len(frame) * 60 / elapsed, 2), **tracker.get_stats()})
@@ -51,7 +56,8 @@ async def benchmark(sample, subject, case, system_certificates=False):
             "tools": [{"type": "web_search"}], "max_retries": backend.OPENAI_MAX_RETRIES,
             "system_certificates": system_certificates, "runs": runs,
             "speedup": round(runs[0]["seconds"] / runs[1]["seconds"], 2),
-            "classification_differences": sorted(outputs[0] ^ outputs[1])}
+            "classification_differences": sorted(url for url in outputs[0].keys() | outputs[1].keys()
+                                                 if outputs[0].get(url) != outputs[1].get(url))}
 
 
 if __name__ == "__main__":

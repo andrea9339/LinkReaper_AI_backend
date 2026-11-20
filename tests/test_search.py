@@ -60,7 +60,7 @@ class SearchTests(unittest.TestCase):
         self.start_patch(patch.object(backend, "GoogleSearch", side_effect=google))
         self.ai_client = MagicMock()
         self.ai_client.__aenter__.return_value = self.ai_client
-        self.ai_client.responses.create = AsyncMock(return_value=SimpleNamespace(output_text="SI"))
+        self.ai_client.responses.create = AsyncMock(return_value=SimpleNamespace(status="completed", output_text="SI"))
         self.start_patch(patch.object(backend, "AsyncOpenAI", return_value=self.ai_client))
         self.start_patch(patch.object(backend, "retry_delay", return_value=0))
         self.client = backend.app.test_client()
@@ -92,7 +92,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(sum(e["type"] in ("complete", "error") for e in events), 1)
         self.assertEqual(self.read_csv(legacy), self.read_csv(complete))
         rows = list(csv.DictReader(io.StringIO(self.read_csv(complete))))
-        self.assertEqual(list(rows[0]), (backend.RESULT_COLUMNS + ["controlla?"]))
+        self.assertEqual(list(rows[0]), backend.RESULT_COLUMNS + ["controlla?"])
         self.assertEqual([row["URL"] for row in rows], ["https://example.test/" + p
                                                        for p in ["a", "custom", "b", "c"]])
         self.assertEqual(rows[0]["Dominio"], "example.test")
@@ -190,7 +190,7 @@ class SearchTests(unittest.TestCase):
             if (url.endswith("/b") and attempt < 4) or (url.endswith("/c") and attempt == 1):
                 raise RateLimitError("PRIVATE CASE AND KEY", response=httpx.Response(
                     429, request=httpx.Request("POST", "https://api.openai.com/v1/responses")), body=None)
-            return SimpleNamespace(output_text="NO" if url.endswith("custom") else "SI")
+            return SimpleNamespace(status="completed", output_text="NO" if url.endswith("custom") else "SI")
 
         with patch.object(self.ai_client.responses, "create", side_effect=ai):
             updates = []
@@ -294,11 +294,11 @@ class SearchTests(unittest.TestCase):
                 events = self.stream()
                 self.assertEqual(events[-1]["results_count"], 0)
                 self.assertEqual(events[-1]["ai_skipped"], "no_candidates")
-                self.assertEqual(self.read_csv(events[-1]), ",".join((backend.RESULT_COLUMNS + ["controlla?"])) + "\n")
-        with patch.object(self.ai_client.responses, "create", return_value=SimpleNamespace(output_text="NO")):
+                self.assertEqual(self.read_csv(events[-1]), ",".join(backend.RESULT_COLUMNS + ["controlla?"]) + "\n")
+        with patch.object(self.ai_client.responses, "create", return_value=SimpleNamespace(status="completed", output_text="NO")):
             result = backend.run_search(PAYLOAD)
             self.assertEqual(result["results_count"], 0)
-            self.assertEqual(self.read_csv(result), ",".join((backend.RESULT_COLUMNS + ["controlla?"])) + "\n")
+            self.assertEqual(self.read_csv(result), ",".join(backend.RESULT_COLUMNS + ["controlla?"]) + "\n")
 
     def test_invalid_payloads_rejected_before_work(self):
         for path in ["/api/search", "/api/search-stream"]:
@@ -447,7 +447,7 @@ class SearchTests(unittest.TestCase):
             entered.set()
             while not release.is_set():
                 await asyncio.sleep(0.01)
-            return SimpleNamespace(output_text="SI")
+            return SimpleNamespace(status="completed", output_text="SI")
 
         def run():
             try:
@@ -478,7 +478,7 @@ class SearchTests(unittest.TestCase):
             entered.set()
             while not release.is_set():
                 await asyncio.sleep(0.01)
-            return SimpleNamespace(output_text="SI")
+            return SimpleNamespace(status="completed", output_text="SI")
 
         def observe_run(*args, **kwargs):
             try:
@@ -523,7 +523,7 @@ class SearchTests(unittest.TestCase):
         def ai(**kwargs):
             self.assertEqual(threading.get_ident(), caller_thread)
             urls.append(json.loads(kwargs["input"])["url"])
-            return SimpleNamespace(output_text="SI")
+            return SimpleNamespace(status="completed", output_text="SI")
 
         def report(phase, message, count, total, **details):
             self.assertEqual(total, 1000)

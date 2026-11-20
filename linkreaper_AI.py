@@ -4,7 +4,7 @@ import os
 import pandas as pd
 from serpapi import GoogleSearch
 from openai import APIError, AsyncOpenAI
-import httpx
+from httpx import AsyncClient, HTTPError
 from contextlib import AsyncExitStack
 import asyncio
 import math
@@ -159,7 +159,9 @@ di accesso o le prove restano insufficienti, rispondi MANUALE."""
         model="gpt-6.2-sol", reasoning={"effort": "medium"}, instructions=instructions,
         tools=[{"type": "web_search"}], input=json.dumps(state, ensure_ascii=False),
     )
-    if getattr(response, "status", None) == "failed":
+    if response.status == "incomplete":
+        return "MANUALE"
+    if response.status != "completed":
         raise OpenAIFilterError("Sol: richiesta fallita. Nessun nuovo CSV prodotto.")
     answer = (response.output_text or "").strip().upper()
     return answer if answer in {"SI", "NO"} else "MANUALE"
@@ -183,7 +185,7 @@ async def filter_with_openai(df, fixed_part, case_description, report=None, stop
     if not key:
         raise OpenAIFilterError("TYPESAFE_API_KEY mancante. Nessun nuovo CSV prodotto.")
 
-    async with httpx.AsyncClient(timeout=30) as http, AsyncExitStack() as stack:
+    async with AsyncClient(timeout=30) as http, AsyncExitStack() as stack:
         sol = None
 
         async def call_provider(position, name, function, *args):
@@ -196,7 +198,7 @@ async def filter_with_openai(df, fixed_part, case_description, report=None, stop
                     failure = error
                     tracker.increment_failure()
                     raise
-                except (APIError, httpx.HTTPError) as error:
+                except (APIError, HTTPError) as error:
                     status = getattr(getattr(error, "response", None), "status_code", None)
                     if status == 429:
                         tracker.increment_rate_limit()

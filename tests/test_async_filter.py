@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from email.utils import formatdate
 import json
 import os
+from types import SimpleNamespace
 import threading
 import time
 import unittest
@@ -69,11 +70,22 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
 
         jev_http = httpx.AsyncClient(transport=httpx.MockTransport(jev))
         sol_http = httpx.AsyncClient(transport=httpx.MockTransport(sol))
-        with patch.object(backend.httpx, "AsyncClient", return_value=jev_http), patch.object(
-                backend, "AsyncOpenAI", return_value=AsyncOpenAI(api_key="test", http_client=sol_http)):
+        sol_client = AsyncOpenAI(api_key="test", http_client=sol_http)
+        with patch.object(backend, "AsyncClient", return_value=jev_http), patch.object(
+                backend, "AsyncOpenAI", return_value=sol_client):
             result = await backend.filter_with_openai(self.df.iloc[:5], "Cliente", "Caso")
         self.assertEqual(result["Titolo"].tolist(), ["Processo 0", "Processo 2", "Processo 4"])
         self.assertEqual(result["controlla?"].tolist(), ["", "SÌ", ""])
+
+    async def test_sol_requires_a_completed_response_for_negative_decisions(self):
+        client = AsyncMock()
+        for status in ("incomplete", "cancelled"):
+            client.responses.create.return_value = SimpleNamespace(status=status, output_text="NO")
+            if status == "incomplete":
+                self.assertEqual(await backend.classify_sol(client, {}), "MANUALE")
+            else:
+                with self.assertRaises(backend.OpenAIFilterError):
+                    await backend.classify_sol(client, {})
 
     async def test_jev_error_stops_before_sol(self):
         for response in (httpx.Response(401), httpx.Response(200, json={"answers": {}})):
@@ -84,7 +96,7 @@ class AsyncFilterTests(unittest.IsolatedAsyncioTestCase):
                 return response
 
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-            with patch.object(backend.httpx, "AsyncClient", return_value=client), patch.object(
+            with patch.object(backend, "AsyncClient", return_value=client), patch.object(
                     backend, "AsyncOpenAI") as sol, self.assertRaises(backend.OpenAIFilterError):
                 await backend.filter_with_openai(self.df, "Cliente", "Caso")
             self.assertEqual(len(calls), 1)
