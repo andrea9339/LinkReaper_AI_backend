@@ -22,9 +22,9 @@ flowchart TD
     F{"Jev result"}
     G["GPT-6.2 Sol · medium<br/>Opens the result URL through web search if needed"]
     H{"Sol result"}
-    I["Keep link<br/>Leave controlla? blank"]
+    I["Keep Link"]
     J["Exclude link"]
-    K["Keep link for manual review<br/>Set controlla? to SÌ"]
+    K["flagged for human check"]
     L["Export CSV in original order"]
     M["Export keyword matches or an empty CSV<br/>Include the controlla? column"]
 
