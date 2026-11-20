@@ -2,7 +2,10 @@
 
 ## Main Updates
 
-- **Google search** stops each query at the first page without organic results. The backend removes duplicate URLs and prefilters results by keywords in the title or snippet.
+- used ai filtering to have more accurate results
+- asyncronous call from open AI api to improve speed and latency
+- stop the google search at the first page with no result to avoid errors and improve speed
+- **Keyword prefilter** removes duplicate URLs and keeps results with matching keywords in the title or snippet.
 - **Jev** classifies the remaining links. A relevant or unrelated decision stands when its probability is at least 0.8. Ambiguous and lower-confidence results go to **GPT-6.2 Sol**.
 - **GPT-6.2 Sol** uses medium reasoning effort and can open the result URL through web search when it needs more evidence. Links it cannot resolve stay in the CSV with `SÌ` in `controlla?`. Relevant links have an empty cell, and unrelated links are excluded.
 - **Live progress** shows Google search, AI analysis, and CSV preparation. Each search evaluates up to five links concurrently.
